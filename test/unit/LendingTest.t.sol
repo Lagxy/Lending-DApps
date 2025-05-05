@@ -134,16 +134,16 @@ contract LendingTest is Test {
         collateralToken1.approve(address(lending), depositAmount);
         lending.depositCollateral(address(collateralToken1), depositAmount);
 
-        uint256 expectedRepayment = borrowAmount + ((borrowAmount * INITIAL_INTEREST_RATE) / 10000);
+        uint256 expectedDebt = borrowAmount + ((borrowAmount * INITIAL_INTEREST_RATE) / 10000);
 
         vm.expectEmit(true, true, true, true);
-        emit Lending.Borrowed(user1, borrowAmount, expectedRepayment);
+        emit Lending.Borrowed(user1, borrowAmount, expectedDebt);
         lending.borrow(borrowAmount);
         vm.stopPrank();
 
         assertEq(debtToken.balanceOf(user1), borrowAmount);
-        assertEq(lending.getTotalRepayment(user1), expectedRepayment);
-        assertEq(lending.getRemainingDebt(user1), expectedRepayment);
+        assertEq(lending.getLoanDebtAmount(user1), expectedDebt);
+        assertEq(lending.getLoanRemainingDebt(user1), expectedDebt);
     }
 
     function test_Borrow_RevertIfAmountZero() public {
@@ -205,9 +205,9 @@ contract LendingTest is Test {
         lending.repay(repayAmount);
         vm.stopPrank();
 
-        uint256 totalRepayment = lending.getTotalRepayment(user1);
-        assertEq(lending.getRemainingDebt(user1), totalRepayment - repayAmount);
-        assertEq(lending.getRepaidAmount(user1), repayAmount);
+        uint256 totalDebt = lending.getLoanDebtAmount(user1);
+        assertEq(lending.getLoanRemainingDebt(user1), totalDebt - repayAmount);
+        assertEq(lending.getLoanRepaidAmount(user1), repayAmount);
     }
 
     function test_Repay_RevertIfAmountZero() public {
@@ -226,11 +226,11 @@ contract LendingTest is Test {
         lending.depositCollateral(address(collateralToken1), depositAmount);
         lending.borrow(borrowAmount);
 
-        uint256 totalRepayment = lending.getTotalRepayment(user1);
-        debtToken.approve(address(lending), totalRepayment + 1);
+        uint256 totalDebt = lending.getLoanDebtAmount(user1);
+        debtToken.approve(address(lending), totalDebt + 1);
 
         vm.expectRevert(Lending.Lending__AmountExceeds.selector);
-        lending.repay(totalRepayment + 1);
+        lending.repay(totalDebt + 1);
         vm.stopPrank();
     }
 
@@ -243,8 +243,8 @@ contract LendingTest is Test {
         lending.depositCollateral(address(collateralToken1), depositAmount);
         lending.borrow(borrowAmount);
 
-        uint256 totalRepayment = lending.getTotalRepayment(user1);
-        debtToken.approve(address(lending), totalRepayment);
+        uint256 totalDebt = lending.getLoanDebtAmount(user1);
+        debtToken.approve(address(lending), totalDebt);
         vm.stopPrank();
 
         // assuming user1 get debtToken from external source
@@ -255,12 +255,12 @@ contract LendingTest is Test {
         vm.startPrank(user1);
         vm.expectEmit(true, true, true, true);
         emit Lending.DebtResetted(user1);
-        lending.repay(totalRepayment);
+        lending.repay(totalDebt);
         vm.stopPrank();
 
-        assertEq(lending.getRemainingDebt(user1), 0);
-        assertEq(lending.getTotalRepayment(user1), 0);
-        assertEq(lending.getRepaidAmount(user1), 0);
+        assertEq(lending.getLoanRemainingDebt(user1), 0);
+        assertEq(lending.getLoanDebtAmount(user1), 0);
+        assertEq(lending.getLoanRepaidAmount(user1), 0);
     }
 
     // ============ Withdraw Collateral Tests ============
@@ -331,7 +331,7 @@ contract LendingTest is Test {
     //     priceFeed1.updateAnswer(newPrice);
 
     //     // Get debt before liquidation
-    //     uint256 debtBefore = lending.getRemainingDebt(user1);
+    //     uint256 debtBefore = lending.getLoanRemainingDebt(user1);
     //     uint256 maxDebtToCover = (debtBefore * CLOSE_FACTOR) / 1e18;
 
     //     // Calculate expected collateral to seize (including bonus)
@@ -357,7 +357,7 @@ contract LendingTest is Test {
     //     vm.stopPrank();
 
     //     // Check debt reduction and collateral transfer
-    //     assertLt(lending.getRemainingDebt(user1), debtBefore);
+    //     assertLt(lending.getLoanRemainingDebt(user1), debtBefore);
     //     assertGt(collateralToken1.balanceOf(user2), 0);
     //     // check the amount of collateral transferred
     //     assertEq(collateralToken1.balanceOf(user2), expectedCollateralToSeize);
@@ -374,7 +374,7 @@ contract LendingTest is Test {
     //     vm.stopPrank();
 
     //     // Still healthy, should revert
-    //     uint256 debt = lending.getRemainingDebt(user1);
+    //     uint256 debt = lending.getLoanRemainingDebt(user1);
     //     uint256 maxDebtToCover = (debt * CLOSE_FACTOR) / 1e18;
 
     //     vm.startPrank(user2);
@@ -472,7 +472,7 @@ contract LendingTest is Test {
         emit Lending.InterestRateChanged(newRate);
         lending.setInterestRate(newRate);
 
-        assertEq(lending.getInterestRate(), newRate);
+        assertEq(lending.getLoanInterestRate(), newRate);
     }
 
     function test_SetInterestRate_RevertIfNotOwner() public {
