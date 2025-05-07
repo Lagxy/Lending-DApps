@@ -6,6 +6,7 @@ import {Lending} from "../../src/Lending.sol";
 import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {MockV3Aggregator} from "@chainlink/contracts/src/v0.8/tests/MockV3Aggregator.sol";
+import {MockAggregatorV3Interface} from "../mocks/MockAggregatorV3Interface.mock.sol";
 
 contract LendingTest is Test {
     Lending public lending;
@@ -14,6 +15,7 @@ contract LendingTest is Test {
     ERC20Mock public collateralToken2;
     MockV3Aggregator public priceFeed1;
     MockV3Aggregator public priceFeed2;
+    MockAggregatorV3Interface public debtTokenPriceFeed;
 
     address public owner = makeAddr("owner");
     address public user1 = makeAddr("user1");
@@ -39,8 +41,11 @@ contract LendingTest is Test {
         priceFeed1 = new MockV3Aggregator(8, PRICE_1);
         priceFeed2 = new MockV3Aggregator(8, PRICE_2);
 
+        // Deploy mock price feed for debt token
+        debtTokenPriceFeed = new MockAggregatorV3Interface(owner, 60500000000000, 18);
+
         // Deploy lending contract
-        lending = new Lending(owner, address(debtToken));
+        lending = new Lending(owner, address(debtToken), address(debtTokenPriceFeed));
 
         // Add collateral tokens
         lending.addCollateralToken(address(collateralToken1), address(priceFeed1));
@@ -77,7 +82,7 @@ contract LendingTest is Test {
         // Set price to zero
         priceFeed1.updateAnswer(0);
 
-        vm.expectRevert(Lending.Lending__InvalidPriceFeed.selector);
+        vm.expectRevert(Lending.Lending__InvalidAddress.selector);
         lending.getTokenPrice(address(collateralToken1));
     }
 
@@ -85,7 +90,7 @@ contract LendingTest is Test {
         // Set negative price
         priceFeed1.updateAnswer(-100);
 
-        vm.expectRevert(Lending.Lending__InvalidPriceFeed.selector);
+        vm.expectRevert(Lending.Lending__InvalidAddress.selector);
         lending.getTokenPrice(address(collateralToken1));
     }
 
