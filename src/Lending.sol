@@ -2,13 +2,13 @@
 pragma solidity ^0.8.22;
 
 import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
-import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
-import {IUniswapV2Router02} from "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
+// import {IUniswapV2Router02} from "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
+import {PriceFeedLib} from "./PriceFeedLib.sol";
 
 /**
  * @title Secure Lending App with Oracle Integration
@@ -28,25 +28,15 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
     event Repaid(address indexed user, uint256 amount);
     event CollateralTokenAdded(address indexed token, address priceFeed);
     event CollateralTokenRemoved(address indexed token);
-    event InterestRateChanged(uint256 newRate);
-    event LoanDurationLimitChanged(uint256 newDuration);
+    event LoanParamsChanged(uint16 newInterestRate, uint32 newDurationLimit);
     event Liquidated(address indexed user, address indexed token, uint256 collateralSeized);
-    event DebtResetted(address indexed user);
     event PriceFeedUpdated(address indexed token, address newPriceFeed);
-    event RaisingCollateral(
-        address indexed user,
-        address indexed token,
-        uint256 amount,
-        uint256 interestRate,
-        uint256 collateralRaisingDuration
-    );
+    event RaisingCollateral(address indexed user, address indexed token, uint256 amount, uint16 interestRate);
     event CollateralFunded(address indexed user, address indexed funder, uint256 amount);
     event CollateralRaisingCancelled(address indexed user);
     event CollateralRaisingEnded(address indexed user);
-    event CollateralRaisingResetted(address indexed user);
     event CollateralRepayment(address indexed user, address indexed funder, uint256 amount);
     event InterestPaid(address indexed user, address indexed funder, uint256 amount);
-    event CollateralRefunded(address indexed user, uint256 amount);
 
     // ==============================================
     // Errors
@@ -55,8 +45,6 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
     error Lending__InvalidAddress();
     /// @notice Thrown when an amount is zero or lower
     error Lending__MustBeMoreThanZero();
-    /// @notice Thrown when a token transfer fails
-    // error Lending__TokenTransferFailed();
     /// @notice Thrown when an amount exceeds allowed limits
     error Lending__AmountExceedsLimit();
     /// @notice Thrown when contract has insufficient fund to lend
@@ -103,50 +91,50 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
     struct Loan {
         uint256 totalDebt;
         uint256 totalRepaid;
-        uint256 interestRateBPS;
-        uint256 dueDate;
+        uint16 interestRateBPS;
+        uint32 dueDate;
     }
-    // bool active; // unused/redundant
+
+    struct FunderInfo {
+        uint256 amount;
+        uint256 reward;
+    }
 
     struct CollateralRaising {
         bool isOpen;
         bool isOngoing;
-        uint256 interestRateInBPS;
+        uint16 interestRateInBPS;
         address collateralToken;
         uint256 targetCollateral;
         uint256 collateralRaised;
-        uint256 collateralRaisingDuration;
         address[] funders;
-        mapping(address funder => uint256 amount) funderAmounts;
-        mapping(address funder => uint256 amount) funderRewards;
+        mapping(address => FunderInfo) funderInfo;
     }
 
     // ==============================================
     // Constants
     // ==============================================
-    uint256 private constant MAX_COLLATERAL_TOKENS = 50;
-    uint256 private constant BPS_DENOMINATOR = 10_000;
-    uint256 private constant PRICE_STALE_TIME = 24 hours;
-    uint256 private constant LTV_BPS = 7000; // 70% LTV ratio in BPS (adjustable before deployment)
-    uint256 private constant HEALTH_FACTOR_THRESHOLD_BPS = 10_000; // 100%
-    uint256 private constant LIQUIDATION_PENALTY_BPS = 1000; // 10%
-    uint256 private constant PRICE_PRECISION = 1e18; // Used for inverse price calculations
-    uint256 private constant ADDITIONAL_PRICE_FEED_PRECISION = 1e10; // Used for additional pricefeed precision
+    uint8 public constant MAX_COLLATERAL_TOKENS = 50;
+    uint16 public constant BPS_DENOMINATOR = 10_000;
+    uint24 public constant PRICE_STALE_TIME = 24 hours;
+    uint16 public constant LTV_BPS = 7000; // 70% LTV ratio in BPS (adjustable before deployment)
+    uint16 public constant HEALTH_FACTOR_THRESHOLD_BPS = 10_000; // 100%
+    uint16 public constant LIQUIDATION_PENALTY_BPS = 1000; // 10%
+    uint256 public constant PRICE_PRECISION = 1e18; // Used for inverse price calculations
 
     // ==============================================
     // State Variables
     // ==============================================
 
-    IERC20 private immutable i_debtToken;
-    AggregatorV3Interface private immutable i_debtTokenPriceFeed;
-    IUniswapV2Router02 public immutable i_uniswapRouter;
+    IERC20 public immutable i_debtToken;
+    AggregatorV3Interface public immutable i_debtTokenPriceFeed;
+    // IUniswapV2Router02 public immutable i_uniswapRouter;
 
-    uint256 private s_loanDurationLimit;
-    uint256 private s_interestRate;
-    address[] private s_collateralTokens;
-    mapping(address token => bool isSupported) private s_supportedCollaterals;
-    mapping(address token => uint8 decimals) private s_priceFeedDecimals;
+    uint32 public s_loanDurationLimit;
+    uint16 public s_interestRate;
+    address[] public s_collateralTokens;
     mapping(address token => AggregatorV3Interface priceFeed) private s_priceFeeds;
+
     mapping(address user => mapping(address token => uint256 amount)) private s_collateralDeposited;
     mapping(address user => Loan loan) private s_loans;
     mapping(address user => CollateralRaising collateralRaising) private s_collateralRaisings;
@@ -161,12 +149,10 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
         _;
     }
 
-    constructor(address initialOwner, address _debtToken, address _debtTokenPriceFeed, address _uniswapRouter)
-        Ownable(initialOwner)
-    {
+    constructor(address initialOwner, address _debtToken, address _debtTokenPriceFeed) Ownable(initialOwner) {
         i_debtToken = IERC20(_debtToken);
         i_debtTokenPriceFeed = AggregatorV3Interface(_debtTokenPriceFeed);
-        i_uniswapRouter = IUniswapV2Router02(_uniswapRouter);
+        // i_uniswapRouter = IUniswapV2Router02(_uniswapRouter);
 
         // initial value
         s_loanDurationLimit = 365 days;
@@ -186,7 +172,7 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
     function depositCollateral(address _token, uint256 _amount) external nonReentrant whenNotPaused {
         if (_token == address(0)) revert Lending__InvalidAddress();
         if (_amount <= 0) revert Lending__MustBeMoreThanZero();
-        if (!s_supportedCollaterals[_token]) revert Lending__TokenNotSupported();
+        if (!isCollateralSupported(_token)) revert Lending__TokenNotSupported();
 
         IERC20(_token).safeTransferFrom(msg.sender, address(this), _amount);
         s_collateralDeposited[msg.sender][_token] += _amount;
@@ -204,7 +190,7 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
         if (_token == address(0)) revert Lending__InvalidAddress();
         if (_amount <= 0) revert Lending__MustBeMoreThanZero();
         if (_amount > s_collateralDeposited[msg.sender][_token]) revert Lending__InsufficientCollateral();
-        if (getLoanRemainingDebt(msg.sender) > 0) revert Lending__OutstandingDebt();
+        if (getUserLoanInfo(msg.sender).totalDebt > 0) revert Lending__OutstandingDebt();
 
         s_collateralDeposited[msg.sender][_token] -= _amount;
         IERC20(_token).safeTransfer(msg.sender, _amount);
@@ -224,14 +210,14 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
         if (_amount > i_debtToken.balanceOf(address(this))) revert Lending__InsufficientLiquidity();
         if (s_loans[msg.sender].totalDebt > 0) revert Lending__OutstandingDebt();
 
-        uint256 collateralValue = getTotalCollateralValue(msg.sender);
+        uint256 collateralValue = getTotalCollateralValueInDebtToken(msg.sender);
         uint256 maxLoan = (collateralValue * LTV_BPS) / BPS_DENOMINATOR;
         if (_amount > maxLoan) revert Lending__AmountExceedsLimit();
 
         uint256 interest = (_amount * s_interestRate) / BPS_DENOMINATOR;
         s_loans[msg.sender].totalDebt = _amount + interest;
         s_loans[msg.sender].interestRateBPS = s_interestRate;
-        s_loans[msg.sender].dueDate = block.timestamp + s_loanDurationLimit;
+        s_loans[msg.sender].dueDate = uint32(block.timestamp + s_loanDurationLimit);
         i_debtToken.safeTransfer(msg.sender, _amount);
 
         emit Borrowed(msg.sender, _amount, s_loans[msg.sender].totalDebt);
@@ -245,7 +231,7 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
     function repayLoan(uint256 _amount) external nonReentrant whenNotPaused noFlashLoans {
         if (_amount <= 0) revert Lending__MustBeMoreThanZero();
 
-        uint256 remainingDebt = getLoanRemainingDebt(msg.sender);
+        uint256 remainingDebt = getUserLoanInfo(msg.sender).totalDebt;
         if (_amount > remainingDebt) revert Lending__AmountExceedsLimit();
 
         i_debtToken.safeTransferFrom(msg.sender, address(this), _amount);
@@ -263,28 +249,25 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
      * @param _token The address of collateral token to raise
      * @param _goals The amount of collateral token to raise
      * @param _interestRateBPS The amount of interest rate promised in BPS
-     * @param _raisingDuration The raising duration of the collateral raising
      * @dev emit RaisingCollateral event
      */
-    function startCollateralRaising(address _token, uint256 _goals, uint256 _interestRateBPS, uint256 _raisingDuration)
+    function startCollateralRaising(address _token, uint256 _goals, uint16 _interestRateBPS)
         external
         whenNotPaused
         noFlashLoans
     {
         if (_token == address(0)) revert Lending__InvalidAddress();
-        if (!s_supportedCollaterals[_token]) revert Lending__TokenNotSupported();
+        if (!isCollateralSupported(_token)) revert Lending__TokenNotSupported();
         if (_goals <= 0) revert Lending__MustBeMoreThanZero();
-        if (_raisingDuration <= 0) revert Lending__MustBeMoreThanZero();
         if (s_collateralRaisings[msg.sender].isOngoing) revert Lending__CollateralRaisingOngoing();
 
         s_collateralRaisings[msg.sender].isOpen = true;
         s_collateralRaisings[msg.sender].isOngoing = true;
-        s_collateralRaisings[msg.sender].collateralRaisingDuration = block.timestamp + _raisingDuration;
         s_collateralRaisings[msg.sender].interestRateInBPS = _interestRateBPS;
         s_collateralRaisings[msg.sender].collateralToken = _token;
         s_collateralRaisings[msg.sender].targetCollateral = _goals;
 
-        emit RaisingCollateral(msg.sender, _token, _goals, _interestRateBPS, _raisingDuration);
+        emit RaisingCollateral(msg.sender, _token, _goals, _interestRateBPS);
     }
 
     /**
@@ -299,16 +282,15 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
         if (_user == address(0)) revert Lending__InvalidAddress();
         if (!raising.isOpen) revert Lending__CollateralRaisingClosed();
         if (!raising.isOngoing) revert Lending__NoActiveCollateralRaising();
-        if (raising.collateralRaisingDuration < block.timestamp) revert Lending__Expired();
         if (raising.targetCollateral == raising.collateralRaised) revert Lending__CollateralRaisingGoalReached();
         if (_amount > (raising.targetCollateral - raising.collateralRaised)) revert Lending__AmountExceedsLimit();
         if (_amount <= 0) revert Lending__MustBeMoreThanZero();
 
         s_collateralRaisings[_user].collateralRaised += _amount;
-        if (raising.funderAmounts[msg.sender] == 0) {
+        if (raising.funderInfo[msg.sender].amount == 0) {
             s_collateralRaisings[_user].funders.push(msg.sender);
         }
-        s_collateralRaisings[_user].funderAmounts[msg.sender] += _amount;
+        s_collateralRaisings[_user].funderInfo[msg.sender].amount += _amount;
         IERC20(s_collateralRaisings[_user].collateralToken).safeTransferFrom(msg.sender, address(this), _amount);
 
         if (s_collateralRaisings[_user].collateralRaised >= s_collateralRaisings[_user].targetCollateral) {
@@ -320,7 +302,6 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
 
     /**
      * @notice Cancel active raising and refund all the fund to funder
-     * @dev emit CollateralRaisingCancelled event
      */
     function cancelCollateralRaising() external nonReentrant whenNotPaused {
         CollateralRaising storage raising = s_collateralRaisings[msg.sender];
@@ -333,13 +314,10 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
         address collateralToken = s_collateralRaisings[msg.sender].collateralToken;
         for (uint256 i = 0; i < funders.length; i++) {
             address funder = funders[i];
-            uint256 amount = s_collateralRaisings[msg.sender].funderAmounts[funder];
+            uint256 amount = s_collateralRaisings[msg.sender].funderInfo[funder].amount;
             if (amount > 0) {
-                // instead of the caller pay the gas, letting the funder withdraw their own fund
                 s_collateralDeposited[funder][collateralToken] += amount;
-                s_collateralRaisings[msg.sender].funderAmounts[funder] = 0;
-
-                emit CollateralRefunded(funder, amount);
+                s_collateralRaisings[msg.sender].funderInfo[funder].amount = 0;
             }
         }
 
@@ -366,11 +344,11 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
         CollateralRaising storage raising = s_collateralRaisings[msg.sender];
         if (_funder == address(0)) revert Lending__InvalidAddress();
         if (_amount <= 0) revert Lending__MustBeMoreThanZero();
-        if (_amount > raising.funderAmounts[_funder]) revert Lending__AmountExceedsLimit();
-        // to check if _funder is on the funder array, need to loop which may be expensive
+        if (_amount > raising.funderInfo[_funder].amount) revert Lending__AmountExceedsLimit();
+        // may need to check if funder is in array funder
 
         IERC20(raising.collateralToken).safeTransferFrom(msg.sender, _funder, _amount);
-        s_collateralRaisings[msg.sender].funderAmounts[_funder] -= _amount;
+        s_collateralRaisings[msg.sender].funderInfo[_funder].amount -= _amount;
 
         emit CollateralRepayment(msg.sender, _funder, _amount);
     }
@@ -384,10 +362,10 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
     function payFunderInterest(address _funder, uint256 _amount) external nonReentrant whenNotPaused {
         if (_funder == address(0)) revert Lending__InvalidAddress();
         if (_amount <= 0) revert Lending__MustBeMoreThanZero();
-        if (_amount > s_collateralRaisings[msg.sender].funderRewards[_funder]) revert Lending__AmountExceedsLimit();
+        if (_amount > s_collateralRaisings[msg.sender].funderInfo[_funder].reward) revert Lending__AmountExceedsLimit();
 
         i_debtToken.safeTransferFrom(msg.sender, _funder, _amount);
-        s_collateralRaisings[msg.sender].funderRewards[_funder] -= _amount;
+        s_collateralRaisings[msg.sender].funderInfo[_funder].reward -= _amount;
 
         emit InterestPaid(msg.sender, _funder, _amount);
     }
@@ -397,33 +375,36 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
      * @param _user The address of user to liquidate
      * @param _token The address of collateral token to liquidate
      */
-    function liquidate(address _user, address _token) external nonReentrant whenNotPaused noFlashLoans {
-        if (_user == address(0) || _token == address(0)) revert Lending__InvalidAddress();
-        if (!s_supportedCollaterals[_token]) revert Lending__TokenNotSupported();
+    // function liquidate(address _user, address _token) external nonReentrant whenNotPaused noFlashLoans {
+    //     if (_user == address(0) || _token == address(0)) revert Lending__InvalidAddress();
+    //     if (!isCollateralSupported(_token)) revert Lending__TokenNotSupported();
 
-        uint256 healthFactor = _calculateHealthFactorBPS(_user);
-        if (healthFactor >= HEALTH_FACTOR_THRESHOLD_BPS) revert Lending__NotLiquidatable();
+    //     uint256 healthFactor = _calculateHealthFactorBPS(_user);
 
-        Loan storage loan = s_loans[_user];
-        uint256 totalDebt = loan.totalDebt - loan.totalRepaid;
-        if (totalDebt == 0) revert Lending__NotLiquidatable();
+    //     Loan storage loan = s_loans[_user];
+    //     uint256 totalDebt = loan.totalDebt - loan.totalRepaid;
 
-        // Calculate collateral to seize (debt + 10% penalty)
-        uint256 seizeAmount = (totalDebt * (BPS_DENOMINATOR + LIQUIDATION_PENALTY_BPS)) / BPS_DENOMINATOR;
-        uint256 collateralToSeize = _convertDebtToCollateral(_token, seizeAmount);
+    //     if (totalDebt == 0) revert Lending__NotLiquidatable();
+    //     if (healthFactor >= HEALTH_FACTOR_THRESHOLD_BPS) {
+    //         // dueDate bypass healthFactor check
+    //         if(loan.dueDate > block.timestamp) revert Lending__NotLiquidatable();
+    //     }
 
-        uint256 userCollateral = s_collateralDeposited[_user][_token];
-        if (collateralToSeize > userCollateral) {
-            collateralToSeize = userCollateral;
-        }
+    //     uint256 seizeAmount = (totalDebt * (BPS_DENOMINATOR + LIQUIDATION_PENALTY_BPS)) / BPS_DENOMINATOR;
+    //     uint256 collateralToSeize = _convertDebtToCollateral(_token, seizeAmount);
 
-        s_collateralDeposited[_user][_token] -= collateralToSeize;
-        _resetDebt(_user);
+    //     uint256 userCollateral = s_collateralDeposited[_user][_token];
+    //     if (collateralToSeize > userCollateral) {
+    //         collateralToSeize = userCollateral;
+    //     }
 
-        _swapCollateralToDebtToken(_token, collateralToSeize);
+    //     s_collateralDeposited[_user][_token] -= collateralToSeize;
+    //     _resetDebt(_user);
 
-        emit Liquidated(_user, _token, collateralToSeize);
-    }
+    //     _swapCollateralToDebtToken(_token, collateralToSeize);
+
+    //     emit Liquidated(_user, _token, collateralToSeize);
+    // }
 
     // ==============================================
     // Admin Functions
@@ -457,32 +438,28 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
      * @dev Only callable by owner with valid parameters, emit CollateralTokenAdded event
      */
     function addCollateralToken(address _token, address _priceFeed) external onlyOwner {
-        if (_token == address(0)) revert Lending__InvalidAddress();
-        if (_priceFeed == address(0)) revert Lending__InvalidAddress();
-        if (s_supportedCollaterals[_token]) revert Lending__TokenAlreadySupported();
+        if (_token == address(0) || _priceFeed == address(0)) revert Lending__InvalidAddress();
+        if (isCollateralSupported(_token)) revert Lending__TokenAlreadySupported();
         if (s_collateralTokens.length >= MAX_COLLATERAL_TOKENS) revert Lending__MaxTokensReached();
 
         s_collateralTokens.push(_token);
-        s_supportedCollaterals[_token] = true;
         s_priceFeeds[_token] = AggregatorV3Interface(_priceFeed);
-        s_priceFeedDecimals[_token] = s_priceFeeds[_token].decimals();
 
         emit CollateralTokenAdded(_token, _priceFeed);
     }
 
     /**
      * @notice Update the price feed for a collateral token
-     * @param _priceFeed The address of the token to update
+     * @param _token The address of the token to update
      * @param _newPriceFeed The new Chainlink price feed address
      * @dev Only callable by owner for supported tokens, emit PriceFeedUpdated event
      */
-    function updatePriceFeed(address _priceFeed, address _newPriceFeed) external onlyOwner {
-        if (!s_supportedCollaterals[_priceFeed]) revert Lending__TokenNotSupported();
+    function updatePriceFeed(address _token, address _newPriceFeed) external onlyOwner {
         if (_newPriceFeed == address(0)) revert Lending__InvalidAddress();
+        if (!isCollateralSupported(_token)) revert Lending__TokenNotSupported();
 
-        s_priceFeeds[_priceFeed] = AggregatorV3Interface(_newPriceFeed);
-        s_priceFeedDecimals[_priceFeed] = AggregatorV3Interface(_newPriceFeed).decimals();
-        emit PriceFeedUpdated(_priceFeed, _newPriceFeed);
+        s_priceFeeds[_token] = AggregatorV3Interface(_newPriceFeed);
+        emit PriceFeedUpdated(_token, _newPriceFeed);
     }
 
     /**
@@ -491,7 +468,7 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
      * @dev Only callable by owner for supported tokens, emit CollateralTokenRemoved event
      */
     function removeCollateralToken(address _token) external onlyOwner {
-        if (!s_supportedCollaterals[_token]) revert Lending__TokenNotSupported();
+        if (!isCollateralSupported(_token)) revert Lending__TokenNotSupported();
 
         uint256 collateralTokenLength = s_collateralTokens.length;
         for (uint256 i = 0; i < collateralTokenLength; i++) {
@@ -502,29 +479,20 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
             }
         }
 
-        s_supportedCollaterals[_token] = false;
         emit CollateralTokenRemoved(_token);
     }
 
     /**
-     * @notice Set the interest rate for borrowing
-     * @param _newRate The new interest rate in basis points
-     * @dev Only callable by owner, rate must be <= 10000 (100%), Emit LoanDurationLimitChanged event
+     * @notice Set loan parameter like interest rate and duration limit
+     * @param _newRate The new value for interest rate
+     * @param _newDuration The new value for duration time limit
+     * @dev Emit LoanParamsChanged event
      */
-    function setInterestRate(uint256 _newRate) external onlyOwner {
+    function setLoanParams(uint16 _newRate, uint32 _newDuration) external onlyOwner {
         if (_newRate > BPS_DENOMINATOR) revert Lending__AmountExceedsLimit();
         s_interestRate = _newRate;
-        emit InterestRateChanged(_newRate);
-    }
-
-    /**
-     * @notice Set the loan collateralRaisingDuration limit for borrowing
-     * @param _newDuration The new loan collateralRaisingDuration limit in seconds
-     * @dev Only callable by owner, Emit LoanDurationLimitChanged event
-     */
-    function setLoanDurationLimit(uint256 _newDuration) external onlyOwner {
         s_loanDurationLimit = _newDuration;
-        emit LoanDurationLimitChanged(_newDuration);
+        emit LoanParamsChanged(_newRate, _newDuration);
     }
 
     /**
@@ -555,49 +523,35 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
     function _endCollateralRaising(address _user) internal {
         if (_user == address(0)) revert Lending__InvalidAddress();
         if (!s_collateralRaisings[msg.sender].isOngoing) revert Lending__NoActiveCollateralRaising();
-
-        // if the user is the caller itself, he/she/him can end the raising before the raisingAmount reached or before raising duration ended
         if (msg.sender != _user) {
-            if (block.timestamp < s_collateralRaisings[_user].collateralRaisingDuration) {
-                revert Lending__CollateralRaisingOngoing();
-            }
             if (s_collateralRaisings[_user].collateralRaised < s_collateralRaisings[_user].targetCollateral) {
                 revert Lending__CollateralRaisingGoalNotMet();
             }
         }
 
         address collateralToken = s_collateralRaisings[_user].collateralToken;
-
-        // Make the fund able to be used by user
         s_collateralDeposited[_user][collateralToken] += s_collateralRaisings[_user].collateralRaised;
 
-        // Calculate interest in debt token user needs to pay later
-        uint256 debtTokenPrice = getDebtTokenPriceInUsd(); // debt token price in USD
-        uint256 collateralTokenPrice = getTokenPriceInUsd(collateralToken); // collateral token price in USD
-        uint256 interestRateInBPS = s_collateralRaisings[_user].interestRateInBPS; // interest rate in BPS (e.g 500 = 5%)
+        uint256 tokenPriceInDebtToken = _getTokenPriceInDebtToken(collateralToken);
+        uint256 interestRateInBPS = s_collateralRaisings[_user].interestRateInBPS;
 
-        // Set how much interest reward each funder get based on total collateral value they fund
-        /// @dev critical and vulnerable to get wrong calculation
         uint256 funderLength = s_collateralRaisings[_user].funders.length;
         for (uint256 i = 0; i < funderLength; i++) {
             address funder = s_collateralRaisings[_user].funders[i];
-            uint256 amountFunded = s_collateralRaisings[_user].funderAmounts[funder];
-            uint256 amountFundedInUsd = amountFunded * collateralTokenPrice / PRICE_PRECISION;
-            uint256 collateralValueInDebtToken = (amountFundedInUsd * PRICE_PRECISION) / debtTokenPrice;
+            uint256 amountFunded = s_collateralRaisings[_user].funderInfo[funder].amount;
+            uint256 totalRewardInDebtToken = (amountFunded * tokenPriceInDebtToken) / 1e18;
 
-            s_collateralRaisings[_user].funderRewards[funder] =
-                (collateralValueInDebtToken * interestRateInBPS) / BPS_DENOMINATOR;
+            s_collateralRaisings[_user].funderInfo[funder].reward =
+                (totalRewardInDebtToken * interestRateInBPS) / BPS_DENOMINATOR;
         }
 
         s_collateralRaisings[_user].isOpen = false;
-
         emit CollateralRaisingEnded(_user);
     }
 
     /**
      * @notice Reset a collateral raising detail to zero
      * @param _user The address of the user to reset
-     * @dev Emits CollateralRaisingResetted event
      */
     function _resetCollateralRaising(address _user) private {
         if (_user == address(0)) revert Lending__InvalidAddress();
@@ -605,30 +559,25 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
         uint256 funderLength = s_collateralRaisings[_user].funders.length;
         for (uint256 i = 0; i < funderLength; i++) {
             address funder = s_collateralRaisings[_user].funders[i];
-            if (s_collateralRaisings[_user].funderAmounts[funder] > 0) revert Lending__UnsettledCollateralDebt();
-            if (s_collateralRaisings[_user].funderRewards[funder] > 0) revert Lending__UnsettledInterestDebt();
+            if (s_collateralRaisings[_user].funderInfo[funder].amount > 0) revert Lending__UnsettledCollateralDebt();
+            if (s_collateralRaisings[_user].funderInfo[funder].reward > 0) revert Lending__UnsettledInterestDebt();
 
-            // Resets mapping in one go
-            delete s_collateralRaisings[_user].funderAmounts[funder];
-            delete s_collateralRaisings[_user].funderRewards[funder];
+            delete s_collateralRaisings[_user].funderInfo[funder];
+            delete s_collateralRaisings[_user].funderInfo[funder];
         }
 
         delete s_collateralRaisings[_user];
-
-        emit CollateralRaisingResetted(_user);
     }
 
     /**
      * @notice Reset a user's debt to zero
      * @param _user The address of the user to reset
-     * @dev Emits DebtResetted event
      */
     function _resetDebt(address _user) private {
         s_loans[_user].totalDebt = 0;
         s_loans[_user].totalRepaid = 0;
         s_loans[_user].dueDate = 0;
         s_loans[_user].interestRateBPS = 0;
-        emit DebtResetted(_user);
     }
 
     /**
@@ -637,8 +586,8 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
      * @return The health factor as 18 decimal fixed point number
      */
     function _calculateHealthFactorBPS(address _user) internal view returns (uint256) {
-        uint256 collateralValue = getTotalCollateralValue(_user);
-        uint256 debtValue = getLoanRemainingDebt(_user);
+        uint256 collateralValue = getTotalCollateralValueInDebtToken(_user);
+        uint256 debtValue = getUserLoanInfo(_user).totalDebt;
 
         if (debtValue == 0) return type(uint256).max;
 
@@ -646,42 +595,33 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
         return (collateralValue * LTV_BPS) / (debtValue * BPS_DENOMINATOR); // Maintain 18 decimals
     }
 
+    function _getTokenPriceInDebtToken(address _token) internal view returns (uint256) {
+        PriceFeedLib.PriceData memory collateral =
+            PriceFeedLib.getNormalizedPrice(s_priceFeeds[_token], PRICE_STALE_TIME);
+        PriceFeedLib.PriceData memory debt = PriceFeedLib.getNormalizedPrice(i_debtTokenPriceFeed, PRICE_STALE_TIME);
+        return PriceFeedLib.convertPrice(collateral, debt);
+    }
+
     /**
      * @notice Swap collateral to debt token
      * @param _token The address of token to swap
      * @param _amount The amount of token to swap
      */
-    function _swapCollateralToDebtToken(address _token, uint256 _amount) internal {
-        IERC20(_token).forceApprove(address(i_uniswapRouter), _amount);
+    // function _swapCollateralToDebtToken(address _token, uint256 _amount) internal {
+    //     IERC20(_token).forceApprove(address(i_uniswapRouter), _amount);
 
-        address[] memory path = new address[](2);
-        path[0] = _token;
-        path[1] = address(i_debtToken);
+    //     address[] memory path = new address[](2);
+    //     path[0] = _token;
+    //     path[1] = address(i_debtToken);
 
-        i_uniswapRouter.swapExactTokensForTokens(
-            _amount,
-            0, // Minimum amount out
-            path,
-            address(this),
-            block.timestamp + 300
-        );
-    }
-
-    /**
-     * @notice Converts debt amount to collateral amount using price feeds
-     * @param _token The address of collateral token to price convert to
-     * @param _debtAmount The amount of debt
-     * @return The collateral amount
-     */
-    function _convertDebtToCollateral(address _token, uint256 _debtAmount) internal view returns (uint256) {
-        (, int256 debtTokenPrice,,,) = i_debtTokenPriceFeed.latestRoundData();
-        (, int256 collateralPrice,,,) = s_priceFeeds[_token].latestRoundData();
-
-        uint256 scaledDebtPrice = uint256(debtTokenPrice) * (10 ** (18 - i_debtTokenPriceFeed.decimals()));
-        uint256 scaledCollPrice = uint256(collateralPrice) * (10 ** (18 - s_priceFeedDecimals[_token]));
-
-        return (_debtAmount * scaledDebtPrice) / scaledCollPrice;
-    }
+    //     i_uniswapRouter.swapExactTokensForTokens(
+    //         _amount,
+    //         0, // Minimum amount out
+    //         path,
+    //         address(this),
+    //         block.timestamp + 300
+    //     );
+    // }
 
     // ==============================================
     // View Functions
@@ -692,63 +632,28 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
      * @param _user The address of User
      * @return maxLoan Max debt tokens allowed (including interest)
      */
-    function getMaxLoan(address _user) public view returns (uint256 maxLoan) {
-        uint256 collateralValue = getTotalCollateralValue(_user);
+    function getMaxLoan(address _user) external view returns (uint256 maxLoan) {
+        uint256 collateralValue = getTotalCollateralValueInDebtToken(_user);
         uint256 principal = (collateralValue * LTV_BPS) / BPS_DENOMINATOR;
         return principal + (principal * s_interestRate) / BPS_DENOMINATOR;
     }
 
-    /**
-     * @notice Get the current price of a collateral token in usd (normalized to 1e18 decimals precision)
-     * @param _token The address of the token to query
-     * @return price The current price in 18 decimals
-     * @dev currently using mock price feed
-     */
-    function getTokenPriceInUsd(address _token) public view returns (uint256 price) {
-        AggregatorV3Interface priceFeed = s_priceFeeds[_token];
-        (, int256 priceInt,, uint256 updatedAt,) = priceFeed.latestRoundData();
+    function getTokenPriceInDebtToken(address _token) public view returns (uint256) {
+        return _getTokenPriceInDebtToken(_token);
+    }
 
-        if (priceInt <= 0) revert Lending__InvalidAddress();
-        if (block.timestamp - updatedAt > PRICE_STALE_TIME) revert Lending__StalePriceData();
-
-        /// @dev could use priceFeed.decimals() for runtime check
-        uint8 priceFeedDecimals = s_priceFeedDecimals[_token];
-
-        price = uint256(priceInt) * PRICE_PRECISION / 10 ** priceFeedDecimals;
+    function getDebtTokenPriceInUsd() public view returns (uint256) {
+        PriceFeedLib.PriceData memory debt = PriceFeedLib.getNormalizedPrice(i_debtTokenPriceFeed, PRICE_STALE_TIME);
+        return PriceFeedLib.scaleTo18Decimals(debt.value, debt.decimals);
     }
 
     /**
-     * @notice Get the current price of a collateral token in debtToken (normalized to 1e18 decimals precision)
-     * @param _token The token address of the token
-     * @return price The current price returned in Debt Token (with 18 decimals)
-     */
-    function getTokenPriceInDebtToken(address _token) public view returns (uint256 price) {
-        price = getTokenPriceInUsd(_token) * getDebtTokenPriceInUsd() / PRICE_PRECISION;
-    }
-
-    /**
-     * @notice Get the price feed for DebtToken/USD (in this case IDRX)
-     * @return price The current price in 18 decimals
-     */
-    function getDebtTokenPriceInUsd() public view returns (uint256 price) {
-        AggregatorV3Interface priceFeed = i_debtTokenPriceFeed;
-        (, int256 priceInt,, uint256 updatedAt,) = priceFeed.latestRoundData();
-
-        if (priceInt <= 0) revert Lending__InvalidAddress();
-        if (block.timestamp - updatedAt > PRICE_STALE_TIME) revert Lending__StalePriceData();
-
-        uint8 priceFeedDecimals = priceFeed.decimals();
-        price = uint256(priceInt) * PRICE_PRECISION / 10 ** priceFeedDecimals;
-    }
-
-    /**
-     * @notice Get the total collateral value of a user
+     * @notice Get the total collateral value of a user in terms
      * @param _user The address of the user to query
      * @return totalValue The total collateral value in debt token terms
      */
-    function getTotalCollateralValue(address _user) public view returns (uint256 totalValue) {
+    function getTotalCollateralValueInDebtToken(address _user) public view returns (uint256 totalValue) {
         if (_user == address(0)) revert Lending__InvalidAddress();
-        uint256 debtTokenPrice = getDebtTokenPriceInUsd();
         uint256 collateralTokenLength = s_collateralTokens.length;
 
         for (uint256 i = 0; i < collateralTokenLength; i++) {
@@ -756,26 +661,8 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
             uint256 amount = s_collateralDeposited[_user][token];
 
             if (amount > 0) {
-                uint256 tokenValue = amount * getTokenPriceInUsd(token) / PRICE_PRECISION;
-                // assuming priceFeed is normalized to 1e18
-                totalValue += (tokenValue * PRICE_PRECISION) / debtTokenPrice;
-            }
-        }
-    }
-
-    /**
-     * @notice Get USD value of a user's total collateral
-     * @param _user User address
-     * @return totalValue Total collateral value in USD (1e18 precision)
-     */
-    function getTotalCollateralValueInUsd(address _user) public view returns (uint256 totalValue) {
-        for (uint256 i = 0; i < s_collateralTokens.length; i++) {
-            address token = s_collateralTokens[i];
-            uint256 amount = s_collateralDeposited[_user][token];
-            if (amount > 0) {
-                uint256 currTokenValue = (amount * getTokenPriceInUsd(token)) / PRICE_PRECISION;
-                // assuming priceFeed is normalized to 1e18
-                totalValue += currTokenValue;
+                uint256 tokenPrice = _getTokenPriceInDebtToken(token);
+                totalValue += (amount * tokenPrice) / 1e18;
             }
         }
     }
@@ -785,28 +672,10 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
      * @param _user The address of the user to query
      * @return The remaining debt amount
      */
-    function getLoanRemainingDebt(address _user) public view returns (uint256) {
+    function getLoanRemainingDebt(address _user) external view returns (uint256) {
         uint256 totalDebt = s_loans[_user].totalDebt;
         uint256 repaid = s_loans[_user].totalRepaid;
         return totalDebt > repaid ? totalDebt - repaid : 0;
-    }
-
-    /**
-     * @notice Get the interest rate applied of a user current loan
-     * @param _user The address of the user to query
-     * @return The interest rate applied
-     */
-    function getLoanInterestRateApplied(address _user) public view returns (uint256) {
-        return s_loans[_user].interestRateBPS;
-    }
-
-    /**
-     * @notice Get the due date of a user current loan
-     * @param _user The address of the user to query
-     * @return The due date
-     */
-    function getLoanDueDate(address _user) public view returns (uint256) {
-        return s_loans[_user].dueDate;
     }
 
     /**
@@ -828,41 +697,19 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @notice Get a user's total debt amount (principal + interest)
-     * @param _user The address of the user to query
-     * @return The total repayment amount
+     * @notice get a user loan information
+     * @param _user The address of user to query
      */
-    function getLoanDebtAmount(address _user) public view returns (uint256) {
-        return s_loans[_user].totalDebt;
+    function getUserLoanInfo(address _user) public view returns (Loan memory) {
+        return s_loans[_user];
     }
 
     /**
-     * @notice Get a user's repaid amount
-     * @param _user The address of the user to query
-     * @return The repaid amount
+     * @notice Get the user collateral raising detail
+     * @param _user the collateral raising detail
      */
-    function getLoanRepaidAmount(address _user) public view returns (uint256) {
-        return s_loans[_user].totalRepaid;
-    }
-
-    /**
-     * @notice Get the current interest rate
-     * @return The interest rate in basis points
-     */
-    function getLoanInterestRate() external view returns (uint256) {
-        return s_interestRate;
-    }
-
-    /**
-     * @notice Get the current loan collateralRaisingDuration limit
-     * @return The loan collateralRaisingDuration limit in seconds
-     */
-    function getLoanDurationLimit() external view returns (uint256) {
-        return s_loanDurationLimit;
-    }
-
     function getCollateralRaisingDetails(address _user)
-        public
+        external
         view
         returns (
             bool isOpen,
@@ -870,68 +717,31 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
             address collateralToken,
             uint256 targetCollateral,
             uint256 collateralRaised,
-            uint256 collateralRaisingDuration,
-            uint256 interestRateInBPS
+            uint256 interestRateInBPS,
+            address[] memory funders,
+            FunderInfo[] memory funderInfo
         )
     {
         CollateralRaising storage raising = s_collateralRaisings[_user];
+        address[] memory allFunder = raising.funders;
+
+        uint256 funderLength = raising.funders.length;
+        FunderInfo[] memory allFunderInfo = new FunderInfo[](funderLength);
+
+        for (uint256 i = 0; i < funderLength; i++) {
+            allFunderInfo[i] = raising.funderInfo[allFunder[i]];
+        }
+
         return (
             raising.isOpen,
             raising.isOngoing,
             raising.collateralToken,
             raising.targetCollateral,
             raising.collateralRaised,
-            raising.collateralRaisingDuration,
-            raising.interestRateInBPS
+            raising.interestRateInBPS,
+            allFunder,
+            allFunderInfo
         );
-    }
-
-    /**
-     * @notice Get time remaining for a collateral raising
-     * @param _user Borrower address
-     * @return timeLeft Seconds left until deadline (0 if expired)
-     */
-    function getRaisingTimeLeft(address _user) public view returns (uint256 timeLeft) {
-        if (block.timestamp >= s_collateralRaisings[_user].collateralRaisingDuration) {
-            return 0;
-        }
-        return s_collateralRaisings[_user].collateralRaisingDuration - block.timestamp;
-    }
-
-    /**
-     * @notice Get a funder's contribution and expected reward for a user's raising
-     * @param _user The borrower address
-     * @param _funder The funder address
-     * @return amountFunded Collateral tokens contributed
-     * @return rewardDebtTokens Estimated debt token reward
-     */
-    function getFunderInfo(address _user, address _funder)
-        public
-        view
-        returns (uint256 amountFunded, uint256 rewardDebtTokens)
-    {
-        return (s_collateralRaisings[_user].funderAmounts[_funder], s_collateralRaisings[_user].funderRewards[_funder]);
-    }
-
-    /**
-     * @notice Get all funders for a user's collateral raising
-     * @param _user The borrower address
-     * @return Array of funder addresses
-     */
-    function getCollateralRaisingFunders(address _user) public view returns (address[] memory) {
-        return s_collateralRaisings[_user].funders;
-    }
-
-    /**
-     * @notice Calculate total debt token interest owed by a user to all funders
-     * @param _user Borrower address
-     * @return totalInterest Total debt tokens owed as interest
-     */
-    function getTotalInterestOwed(address _user) public view returns (uint256 totalInterest) {
-        address[] storage funders = s_collateralRaisings[_user].funders;
-        for (uint256 i = 0; i < funders.length; i++) {
-            totalInterest += s_collateralRaisings[_user].funderRewards[funders[i]];
-        }
     }
 
     /**
@@ -939,16 +749,14 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
      * @param _token The address of the token to check
      * @return True if supported, false otherwise
      */
-    function isCollateralSupported(address _token) external view returns (bool) {
-        return s_supportedCollaterals[_token];
-    }
+    function isCollateralSupported(address _token) public view returns (bool) {
+        uint256 collateralTokenLength = s_collateralTokens.length;
+        for (uint256 i = 0; i < collateralTokenLength; i++) {
+            if (_token == s_collateralTokens[i]) {
+                return true;
+            }
+        }
 
-    /**
-     * @notice Get the price feed address for a token
-     * @param _token The address of the token to query
-     * @return The price feed address
-     */
-    function getPriceFeed(address _token) external view returns (address) {
-        return address(s_priceFeeds[_token]);
+        return false;
     }
 }

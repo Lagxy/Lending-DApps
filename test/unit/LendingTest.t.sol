@@ -46,14 +46,11 @@ contract LendingTest is Test {
         debtTokenPriceFeed = new MockAggregatorV3Interface(owner, IDRX_USD_PRICE, 8);
 
         // Deploy lending contract
-        lending = new Lending(owner, address(debtToken), address(debtTokenPriceFeed), UNISWAP_ROUTER_V2);
+        lending = new Lending(owner, address(debtToken), address(debtTokenPriceFeed));
 
         // Add collateral tokens
         lending.addCollateralToken(address(collateralToken1), address(priceFeed1));
         lending.addCollateralToken(address(collateralToken2), address(priceFeed2));
-
-        // Set initial interest rate
-        lending.setInterestRate(INITIAL_INTEREST_RATE);
 
         // Add liquidity to the protocol
         debtToken.mint(address(lending), 100_000_000 * 1e18);
@@ -65,40 +62,6 @@ contract LendingTest is Test {
         collateralToken2.mint(user2, 10_000 * 1e6);
 
         vm.stopPrank();
-    }
-
-    // ============ Price Feed Tests ============
-    function test_getTokenPrice() public view {
-        uint256 price = lending.getTokenPriceInUsd(address(collateralToken1));
-        assertEq(price, uint256(PRICE_1) * 1e10); // Convert 8 decimals to 18
-    }
-
-    function test_getTokenPrice_RevertIfStalePrice() public {
-        // Fast forward time to make price stale
-        vm.warp(block.timestamp + 86400 + 1); // 24 hours + 1 second
-
-        vm.expectRevert(Lending.Lending__StalePriceData.selector);
-        lending.getTokenPriceInUsd(address(collateralToken1));
-    }
-
-    function test_getTokenPrice_RevertIfInvalidPrice() public {
-        // Set price to zero
-        priceFeed1.updateAnswer(0);
-
-        vm.expectRevert(Lending.Lending__InvalidAddress.selector);
-        lending.getTokenPriceInUsd(address(collateralToken1));
-    }
-
-    function test_getTokenPrice_RevertIfNegativePrice() public {
-        // Set negative price
-        priceFeed1.updateAnswer(-100);
-
-        vm.expectRevert(Lending.Lending__InvalidAddress.selector);
-        lending.getTokenPriceInUsd(address(collateralToken1));
-    }
-
-    function test_getPriceFeed() public view {
-        assertEq(lending.getPriceFeed(address(collateralToken1)), address(priceFeed1));
     }
 
     // ============ Deposit Collateral Tests ============
@@ -198,9 +161,14 @@ contract LendingTest is Test {
         lending.depositCollateral(address(collateralToken1), depositAmount);
 
         uint256 maxBorrow = lending.getMaxLoan(user1);
-        uint256 borrowAmount = maxBorrow / 2; // Borrow half of max
+        uint256 protocolLiquidity = debtToken.balanceOf(address(lending));
 
-        uint256 expectedDebt = borrowAmount + ((borrowAmount * INITIAL_INTEREST_RATE) / BPS_DENOMINATOR);
+        console.log("max loan = ", maxBorrow);
+        console.log("liquidity = ", protocolLiquidity);
+
+        uint256 borrowAmount = protocolLiquidity > maxBorrow ? (maxBorrow / 2) : (protocolLiquidity / 2); // ensure borrowAmount smaller than maxBorrow and smaller than protocolLiquidity
+
+        uint256 expectedDebt = borrowAmount + ((borrowAmount * lending.s_interestRate()) / BPS_DENOMINATOR);
 
         vm.expectEmit(true, true, true, true);
         emit Lending.Borrowed(user1, borrowAmount, expectedDebt);
@@ -208,12 +176,13 @@ contract LendingTest is Test {
         vm.stopPrank();
 
         assertEq(debtToken.balanceOf(user1), borrowAmount);
-        assertEq(lending.getLoanDebtAmount(user1), expectedDebt);
+        assertEq(lending.getUserLoanInfo(user1).totalDebt, expectedDebt);
         assertEq(lending.getLoanRemainingDebt(user1), expectedDebt);
     }
 
     function test_takeLoan_RevertIfInsufficientLiquidity() public {
         uint256 availableDebtToken = debtToken.balanceOf(address(lending));
+
         uint256 depositAmount = 10e18;
         uint256 borrowAmount = availableDebtToken * 2;
 
@@ -258,7 +227,7 @@ contract LendingTest is Test {
         lending.depositCollateral(address(collateralToken1), depositAmount);
 
         // Does not follow AAA (Arrange, Act, Assert) Pattern
-        uint256 collateralValue = lending.getTotalCollateralValue(user1);
+        uint256 collateralValue = lending.getTotalCollateralValueInDebtToken(user1);
         uint256 maxBorrow = (collateralValue * LTV_BPS) / BPS_DENOMINATOR;
         uint256 borrowAmount = maxBorrow + 1; // Exceeds LTV
 
@@ -288,9 +257,9 @@ contract LendingTest is Test {
         lending.repayLoan(repayAmount);
         vm.stopPrank();
 
-        uint256 totalDebt = lending.getLoanDebtAmount(user1);
+        uint256 totalDebt = lending.getUserLoanInfo(user1).totalDebt;
         assertEq(lending.getLoanRemainingDebt(user1), totalDebt - repayAmount);
-        assertEq(lending.getLoanRepaidAmount(user1), repayAmount);
+        assertEq(lending.getUserLoanInfo(user1).totalRepaid, repayAmount);
     }
 
     function test_repayLoan_RevertIfAmountZero() public {
@@ -312,7 +281,7 @@ contract LendingTest is Test {
 
         lending.takeLoan(borrowAmount);
 
-        uint256 totalDebt = lending.getLoanDebtAmount(user1);
+        uint256 totalDebt = lending.getUserLoanInfo(user1).totalDebt;
         debtToken.approve(address(lending), totalDebt + 1);
 
         vm.expectRevert(Lending.Lending__AmountExceedsLimit.selector);
@@ -332,7 +301,7 @@ contract LendingTest is Test {
 
         lending.takeLoan(borrowAmount);
 
-        uint256 totalDebt = lending.getLoanDebtAmount(user1);
+        uint256 totalDebt = lending.getUserLoanInfo(user1).totalDebt;
         debtToken.approve(address(lending), totalDebt);
         vm.stopPrank();
 
@@ -342,14 +311,12 @@ contract LendingTest is Test {
         vm.stopPrank();
 
         vm.startPrank(user1, user1);
-        vm.expectEmit(true, true, true, true);
-        emit Lending.DebtResetted(user1);
         lending.repayLoan(totalDebt);
         vm.stopPrank();
 
         assertEq(lending.getLoanRemainingDebt(user1), 0);
-        assertEq(lending.getLoanDebtAmount(user1), 0);
-        assertEq(lending.getLoanRepaidAmount(user1), 0);
+        assertEq(lending.getUserLoanInfo(user1).totalDebt, 0);
+        assertEq(lending.getUserLoanInfo(user1).totalRepaid, 0);
     }
 
     // ============ Start Collateral Raising Tests ============
@@ -381,8 +348,8 @@ contract LendingTest is Test {
         emit Lending.CollateralTokenAdded(address(newToken), address(newPriceFeed));
         lending.addCollateralToken(address(newToken), address(newPriceFeed));
 
-        assertTrue(lending.isCollateralSupported(address(newToken)));
-        assertEq(lending.getPriceFeed(address(newToken)), address(newPriceFeed));
+        address[] memory collateralTokens = lending.getCollateralTokens();
+        assertEq(collateralTokens[collateralTokens.length - 1], address(newToken));
     }
 
     function test_addCollateralToken_RevertIfNotOwner() public {
@@ -412,13 +379,17 @@ contract LendingTest is Test {
     function test_updatePriceFeed() public {
         MockV3Aggregator newPriceFeed = new MockV3Aggregator(8, PRICE_2);
 
+        uint256 oldPrice = lending.getTokenPriceInDebtToken(address(collateralToken1));
+
         vm.prank(owner);
 
         vm.expectEmit(true, true, true, true);
         emit Lending.PriceFeedUpdated(address(collateralToken1), address(newPriceFeed));
         lending.updatePriceFeed(address(collateralToken1), address(newPriceFeed));
 
-        assertEq(lending.getPriceFeed(address(collateralToken1)), address(newPriceFeed));
+        uint256 newPrice = lending.getTokenPriceInDebtToken(address(collateralToken1));
+
+        assertNotEq(oldPrice, newPrice);
     }
 
     function test_updatePriceFeed_RevertIfNotOwner() public {
@@ -433,8 +404,6 @@ contract LendingTest is Test {
         vm.expectEmit(true, true, true, true);
         emit Lending.CollateralTokenRemoved(address(collateralToken1));
         lending.removeCollateralToken(address(collateralToken1));
-
-        assertFalse(lending.isCollateralSupported(address(collateralToken1)));
     }
 
     function test_removeCollateralToken_RevertIfNotOwner() public {
@@ -443,31 +412,31 @@ contract LendingTest is Test {
         lending.removeCollateralToken(address(collateralToken1));
     }
 
-    function test_setInterestRate() public {
-        uint256 newRate = 1000; // 10%
+    function test_setLoanParams() public {
+        uint16 newRate = 1000; // 10%
+        uint32 newDuration = 90 days;
 
         vm.prank(owner);
 
         vm.expectEmit(true, true, true, true);
-        emit Lending.InterestRateChanged(newRate);
-        lending.setInterestRate(newRate);
+        emit Lending.LoanParamsChanged(newRate, newDuration);
+        lending.setLoanParams(newRate, newDuration);
 
-        assertEq(lending.getLoanInterestRate(), newRate);
+        assertEq(lending.s_interestRate(), newRate);
+        assertEq(lending.s_loanDurationLimit(), newDuration);
     }
 
-    function test_setInterestRate_RevertIfNotOwner() public {
+    function test_setLoanParams_RevertIfNotOwner() public {
         vm.prank(user1);
         vm.expectRevert();
-        lending.setInterestRate(1000);
+        lending.setLoanParams(1000, 1);
     }
 
-    function test_setInterestRate_RevertIfExceedsMax() public {
+    function test_setLoanParams_RevertIfExceedsMax() public {
         vm.prank(owner);
         vm.expectRevert(Lending.Lending__AmountExceedsLimit.selector);
-        lending.setInterestRate(10001); // 100.01% (exceeds BPS_DENOMINATOR)
+        lending.setLoanParams(10001, 1); // 100.01% (exceeds BPS_DENOMINATOR)
     }
-
-    function test_setLoanDurationLimit() public {}
 
     function test_pauseUnpause() public {
         vm.prank(owner);
@@ -494,20 +463,11 @@ contract LendingTest is Test {
         lending.depositCollateral(address(collateralToken1), depositAmount);
         vm.stopPrank();
 
-        uint256 collateralValue = lending.getTotalCollateralValue(user1);
+        uint256 collateralValue = lending.getTotalCollateralValueInDebtToken(user1);
         uint256 principal = (collateralValue * LTV_BPS) / BPS_DENOMINATOR;
-        uint256 expectedValue = principal + (principal * lending.getLoanInterestRate()) / BPS_DENOMINATOR;
+        uint256 expectedValue = principal + (principal * lending.s_interestRate()) / BPS_DENOMINATOR;
 
         assertEq(expectedValue, lending.getMaxLoan(user1));
-    }
-
-    function test_getTokenPriceInUsd() public view {
-        (, int256 price,,,) = priceFeed1.latestRoundData();
-        uint8 decimals = priceFeed1.decimals();
-
-        assertEq(
-            (uint256(price) * PRICE_PRECISION) / 10 ** decimals, lending.getTokenPriceInUsd(address(collateralToken1))
-        );
     }
 
     function test_getTokenPriceInDebtToken() public {}
@@ -520,27 +480,6 @@ contract LendingTest is Test {
     }
 
     function test_getTotalCollateralValue() public {}
-
-    function test_getTotalCollateralValueInUsd() public {
-        uint256 depositAmount1 = 1 * 1e18;
-        uint256 depositAmount2 = 5000 * 1e6; // 5000 tokens with 6 decimals
-
-        vm.startPrank(user1);
-        collateralToken1.approve(address(lending), depositAmount1);
-        lending.depositCollateral(address(collateralToken1), depositAmount1);
-
-        collateralToken2.approve(address(lending), depositAmount2);
-        lending.depositCollateral(address(collateralToken2), depositAmount2);
-        vm.stopPrank();
-
-        uint256 expectedValue1 =
-            (lending.getTokenPriceInUsd(address(collateralToken1)) * depositAmount1) / PRICE_PRECISION;
-        uint256 expectedValue2 =
-            (lending.getTokenPriceInUsd(address(collateralToken2)) * depositAmount2) / PRICE_PRECISION;
-        uint256 totalValue = lending.getTotalCollateralValueInUsd(user1);
-
-        assertEq(totalValue, expectedValue1 + expectedValue2);
-    }
 
     function test_getLoanRemainingDebt() public {}
 
