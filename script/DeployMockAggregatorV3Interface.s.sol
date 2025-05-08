@@ -2,11 +2,11 @@
 pragma solidity ^0.8.22;
 
 import {Script, console} from "forge-std/Script.sol";
-import {MockAggregatorV3Interface} from "../test/mocks/MockAggregatorV3Interface.mock.sol";
+import {MockAggregatorV3Interface} from "../test/mocks/MockAggregatorV3Interface.sol";
 
 contract DeployMock is Script {
-    int256 public initialPrice = 60500000000000; // 0.0000605 with 18 decimals
-    uint8 public decimals = 18;
+    int256 public initialPrice = 605000000000; // 0.0000605 with 8 decimals
+    uint8 public decimals = 8;
 
     function run() external {
         vm.startBroadcast();
