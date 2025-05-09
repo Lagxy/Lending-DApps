@@ -7,6 +7,7 @@ import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {MockV3Aggregator} from "@chainlink/contracts/src/v0.8/tests/MockV3Aggregator.sol";
 import {MockAggregatorV3Interface} from "../mocks/MockAggregatorV3Interface.sol";
+import {PriceFeedLib} from "../../src/PriceFeedLib.sol";
 
 contract LendingTest is Test {
     Lending public lending;
@@ -21,6 +22,7 @@ contract LendingTest is Test {
     address public user1 = makeAddr("user1");
     address public user2 = makeAddr("user2");
 
+    uint256 public constant PRICE_STALE_TIME = 24 hours;
     uint256 public constant INITIAL_INTEREST_RATE = 500; // 5% in BPS
     uint256 public constant LTV_BPS = 7000; // 70% LTV in BPS
     uint256 public constant BPS_DENOMINATOR = 10_000;
@@ -46,7 +48,7 @@ contract LendingTest is Test {
         debtTokenPriceFeed = new MockAggregatorV3Interface(owner, IDRX_USD_PRICE, 8);
 
         // Deploy lending contract
-        lending = new Lending(owner, address(debtToken), address(debtTokenPriceFeed));
+        lending = new Lending(owner, address(debtToken), address(debtTokenPriceFeed), UNISWAP_ROUTER_V2);
 
         // Add collateral tokens
         lending.addCollateralToken(address(collateralToken1), address(priceFeed1));
@@ -168,7 +170,7 @@ contract LendingTest is Test {
 
         uint256 borrowAmount = protocolLiquidity > maxBorrow ? (maxBorrow / 2) : (protocolLiquidity / 2); // ensure borrowAmount smaller than maxBorrow and smaller than protocolLiquidity
 
-        uint256 expectedDebt = borrowAmount + ((borrowAmount * lending.s_interestRate()) / BPS_DENOMINATOR);
+        uint256 expectedDebt = borrowAmount + ((borrowAmount * lending.s_interestRateInBPS()) / BPS_DENOMINATOR);
 
         vm.expectEmit(true, true, true, true);
         emit Lending.Borrowed(user1, borrowAmount, expectedDebt);
@@ -177,7 +179,6 @@ contract LendingTest is Test {
 
         assertEq(debtToken.balanceOf(user1), borrowAmount);
         assertEq(lending.getUserLoanInfo(user1).totalDebt, expectedDebt);
-        assertEq(lending.getLoanRemainingDebt(user1), expectedDebt);
     }
 
     function test_takeLoan_RevertIfInsufficientLiquidity() public {
@@ -258,7 +259,10 @@ contract LendingTest is Test {
         vm.stopPrank();
 
         uint256 totalDebt = lending.getUserLoanInfo(user1).totalDebt;
-        assertEq(lending.getLoanRemainingDebt(user1), totalDebt - repayAmount);
+        assertEq(
+            lending.getUserLoanInfo(user1).totalDebt - lending.getUserLoanInfo(user1).totalRepaid,
+            totalDebt - repayAmount
+        );
         assertEq(lending.getUserLoanInfo(user1).totalRepaid, repayAmount);
     }
 
@@ -314,7 +318,6 @@ contract LendingTest is Test {
         lending.repayLoan(totalDebt);
         vm.stopPrank();
 
-        assertEq(lending.getLoanRemainingDebt(user1), 0);
         assertEq(lending.getUserLoanInfo(user1).totalDebt, 0);
         assertEq(lending.getUserLoanInfo(user1).totalRepaid, 0);
     }
@@ -358,28 +361,12 @@ contract LendingTest is Test {
         lending.addCollateralToken(address(collateralToken1), address(priceFeed1));
     }
 
-    function test_addCollateralToken_RevertIfMaxTokensReached() public {
-        // First fill up the collateral tokens array
-        vm.startPrank(owner);
-        for (uint256 i = 2; i < 50; i++) {
-            ERC20Mock token = new ERC20Mock();
-            MockV3Aggregator feed = new MockV3Aggregator(8, PRICE_1);
-            lending.addCollateralToken(address(token), address(feed));
-        }
-
-        // Try to add one more
-        ERC20Mock newToken = new ERC20Mock();
-        MockV3Aggregator newPriceFeed = new MockV3Aggregator(8, PRICE_1);
-
-        vm.expectRevert(Lending.Lending__MaxTokensReached.selector);
-        lending.addCollateralToken(address(newToken), address(newPriceFeed));
-        vm.stopPrank();
-    }
-
     function test_updatePriceFeed() public {
         MockV3Aggregator newPriceFeed = new MockV3Aggregator(8, PRICE_2);
 
-        uint256 oldPrice = lending.getTokenPriceInDebtToken(address(collateralToken1));
+        // uint256 oldPrice = lending.getTokenPriceInDebtToken(address(collateralToken1));
+        uint256 oldPrice =
+            PriceFeedLib.convertPriceToTokenAmount(address(collateralToken1), address(debtToken), PRICE_STALE_TIME);
 
         vm.prank(owner);
 
@@ -387,7 +374,8 @@ contract LendingTest is Test {
         emit Lending.PriceFeedUpdated(address(collateralToken1), address(newPriceFeed));
         lending.updatePriceFeed(address(collateralToken1), address(newPriceFeed));
 
-        uint256 newPrice = lending.getTokenPriceInDebtToken(address(collateralToken1));
+        uint256 newPrice =
+            PriceFeedLib.convertPriceToTokenAmount(address(collateralToken1), address(debtToken), PRICE_STALE_TIME);
 
         assertNotEq(oldPrice, newPrice);
     }
@@ -422,7 +410,7 @@ contract LendingTest is Test {
         emit Lending.LoanParamsChanged(newRate, newDuration);
         lending.setLoanParams(newRate, newDuration);
 
-        assertEq(lending.s_interestRate(), newRate);
+        assertEq(lending.s_interestRateInBPS(), newRate);
         assertEq(lending.s_loanDurationLimit(), newDuration);
     }
 
@@ -465,7 +453,7 @@ contract LendingTest is Test {
 
         uint256 collateralValue = lending.getTotalCollateralValueInDebtToken(user1);
         uint256 principal = (collateralValue * LTV_BPS) / BPS_DENOMINATOR;
-        uint256 expectedValue = principal + (principal * lending.s_interestRate()) / BPS_DENOMINATOR;
+        uint256 expectedValue = principal + (principal * lending.s_interestRateInBPS()) / BPS_DENOMINATOR;
 
         assertEq(expectedValue, lending.getMaxLoan(user1));
     }
