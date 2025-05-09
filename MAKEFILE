@@ -1,0 +1,2 @@
+run-optimized:
+	solc --optimize --runs=200 GasOptimized.sol

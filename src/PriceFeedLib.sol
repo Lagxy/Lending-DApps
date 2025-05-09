@@ -4,6 +4,8 @@ pragma solidity ^0.8.22;
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 
 library PriceFeedLib {
+    error PriceFeedLib__StalePriceData();
+
     struct PriceData {
         uint256 value;
         uint8 decimals;
@@ -14,7 +16,7 @@ library PriceFeedLib {
         AggregatorV3Interface priceFeed = AggregatorV3Interface(feed);
         (, int256 price,, uint256 updatedAt,) = priceFeed.latestRoundData();
         require(price > 0, "Invalid price");
-        require(block.timestamp - updatedAt <= staleTime, "Stale price");
+        require(block.timestamp - updatedAt <= staleTime, PriceFeedLib__StalePriceData());
 
         return PriceData({value: uint256(price), decimals: priceFeed.decimals(), updatedAt: updatedAt});
     }

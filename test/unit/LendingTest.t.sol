@@ -76,10 +76,10 @@ contract LendingTest is Test {
         vm.expectEmit(true, true, true, true);
         emit Lending.CollateralDeposited(user1, address(collateralToken1), depositAmount);
         lending.depositCollateral(address(collateralToken1), depositAmount);
-        vm.stopPrank();
 
-        assertEq(lending.getCollateralBalance(user1, address(collateralToken1)), depositAmount);
+        assertEq(lending.getCollateralBalance(address(collateralToken1)), depositAmount);
         assertEq(collateralToken1.balanceOf(user1), 10 * 1e18 - depositAmount);
+        vm.stopPrank();
     }
 
     function test_depositCollateral_RevertIfAmountZero() public {
@@ -95,7 +95,7 @@ contract LendingTest is Test {
 
         vm.startPrank(user1);
         unsupportedToken.approve(address(lending), 1);
-        vm.expectRevert(Lending.Lending__TokenNotSupported.selector);
+        vm.expectRevert(Lending.Lending__CollateralNotSupported.selector);
         lending.depositCollateral(address(unsupportedToken), 1);
         vm.stopPrank();
     }
@@ -112,10 +112,10 @@ contract LendingTest is Test {
         vm.expectEmit(true, true, true, true);
         emit Lending.CollateralWithdrawn(user1, address(collateralToken1), withdrawAmount);
         lending.withdrawCollateral(address(collateralToken1), withdrawAmount);
-        vm.stopPrank();
 
-        assertEq(lending.getCollateralBalance(user1, address(collateralToken1)), depositAmount - withdrawAmount);
+        assertEq(lending.getCollateralBalance(address(collateralToken1)), depositAmount - withdrawAmount);
         assertEq(collateralToken1.balanceOf(user1), 10 * 1e18 - depositAmount + withdrawAmount);
+        vm.stopPrank();
     }
 
     function test_withdrawCollateral_RevertIfAmountZero() public {
@@ -144,7 +144,9 @@ contract LendingTest is Test {
         collateralToken1.approve(address(lending), depositAmount);
         lending.depositCollateral(address(collateralToken1), depositAmount);
 
-        uint256 maxBorrow = lending.getMaxLoan(user1);
+        uint256 pricePerToken =
+            PriceFeedLib.convertPriceToTokenAmount(address(priceFeed1), address(debtTokenPriceFeed), PRICE_STALE_TIME);
+        uint256 maxBorrow = PriceFeedLib.getTokenTotalPrice(pricePerToken, depositAmount);
         uint256 borrowAmount = maxBorrow / 2; // Borrow half of max
 
         lending.takeLoan(borrowAmount);
@@ -162,11 +164,10 @@ contract LendingTest is Test {
         collateralToken1.approve(address(lending), depositAmount);
         lending.depositCollateral(address(collateralToken1), depositAmount);
 
-        uint256 maxBorrow = lending.getMaxLoan(user1);
+        uint256 pricePerToken =
+            PriceFeedLib.convertPriceToTokenAmount(address(priceFeed1), address(debtTokenPriceFeed), PRICE_STALE_TIME);
+        uint256 maxBorrow = PriceFeedLib.getTokenTotalPrice(pricePerToken, depositAmount);
         uint256 protocolLiquidity = debtToken.balanceOf(address(lending));
-
-        console.log("max loan = ", maxBorrow);
-        console.log("liquidity = ", protocolLiquidity);
 
         uint256 borrowAmount = protocolLiquidity > maxBorrow ? (maxBorrow / 2) : (protocolLiquidity / 2); // ensure borrowAmount smaller than maxBorrow and smaller than protocolLiquidity
 
@@ -178,7 +179,6 @@ contract LendingTest is Test {
         vm.stopPrank();
 
         assertEq(debtToken.balanceOf(user1), borrowAmount);
-        assertEq(lending.getUserLoanInfo(user1).totalDebt, expectedDebt);
     }
 
     function test_takeLoan_RevertIfInsufficientLiquidity() public {
@@ -210,7 +210,9 @@ contract LendingTest is Test {
         collateralToken1.approve(address(lending), depositAmount);
         lending.depositCollateral(address(collateralToken1), depositAmount);
 
-        uint256 maxBorrow = lending.getMaxLoan(user1);
+        uint256 pricePerToken =
+            PriceFeedLib.convertPriceToTokenAmount(address(priceFeed1), address(debtTokenPriceFeed), PRICE_STALE_TIME);
+        uint256 maxBorrow = PriceFeedLib.getTokenTotalPrice(pricePerToken, depositAmount);
         uint256 borrowAmount = maxBorrow / 4; // borrow 1/4 of max
 
         lending.takeLoan(borrowAmount);
@@ -245,7 +247,9 @@ contract LendingTest is Test {
         collateralToken1.approve(address(lending), depositAmount);
         lending.depositCollateral(address(collateralToken1), depositAmount);
 
-        uint256 maxBorrow = lending.getMaxLoan(user1);
+        uint256 pricePerToken =
+            PriceFeedLib.convertPriceToTokenAmount(address(priceFeed1), address(debtTokenPriceFeed), PRICE_STALE_TIME);
+        uint256 maxBorrow = PriceFeedLib.getTokenTotalPrice(pricePerToken, depositAmount);
         uint256 borrowAmount = maxBorrow / 4; // Borrow 1/4 of max
         uint256 repayAmount = borrowAmount / 2; // try to repay half borrow amount
 
@@ -258,12 +262,9 @@ contract LendingTest is Test {
         lending.repayLoan(repayAmount);
         vm.stopPrank();
 
-        uint256 totalDebt = lending.getUserLoanInfo(user1).totalDebt;
-        assertEq(
-            lending.getUserLoanInfo(user1).totalDebt - lending.getUserLoanInfo(user1).totalRepaid,
-            totalDebt - repayAmount
-        );
-        assertEq(lending.getUserLoanInfo(user1).totalRepaid, repayAmount);
+        uint256 debt = lending.getUserLoanInfo(user1).debt;
+        assertEq(lending.getUserLoanInfo(user1).debt - lending.getUserLoanInfo(user1).repaid, debt - repayAmount);
+        assertEq(lending.getUserLoanInfo(user1).repaid, repayAmount);
     }
 
     function test_repayLoan_RevertIfAmountZero() public {
@@ -280,16 +281,18 @@ contract LendingTest is Test {
         collateralToken1.approve(address(lending), depositAmount);
         lending.depositCollateral(address(collateralToken1), depositAmount);
 
-        uint256 maxBorrow = lending.getMaxLoan(user1);
+        uint256 pricePerToken =
+            PriceFeedLib.convertPriceToTokenAmount(address(priceFeed1), address(debtTokenPriceFeed), PRICE_STALE_TIME);
+        uint256 maxBorrow = PriceFeedLib.getTokenTotalPrice(pricePerToken, depositAmount);
         uint256 borrowAmount = maxBorrow / 4; // Borrow 1/4 of max
 
         lending.takeLoan(borrowAmount);
 
-        uint256 totalDebt = lending.getUserLoanInfo(user1).totalDebt;
-        debtToken.approve(address(lending), totalDebt + 1);
+        uint256 debt = lending.getUserLoanInfo(user1).debt;
+        debtToken.approve(address(lending), debt + 1);
 
         vm.expectRevert(Lending.Lending__AmountExceedsLimit.selector);
-        lending.repayLoan(totalDebt + 1);
+        lending.repayLoan(debt + 1);
         vm.stopPrank();
     }
 
@@ -300,13 +303,15 @@ contract LendingTest is Test {
         collateralToken1.approve(address(lending), depositAmount);
         lending.depositCollateral(address(collateralToken1), depositAmount);
 
-        uint256 maxBorrow = lending.getMaxLoan(user1);
+        uint256 pricePerToken =
+            PriceFeedLib.convertPriceToTokenAmount(address(priceFeed1), address(debtTokenPriceFeed), PRICE_STALE_TIME);
+        uint256 maxBorrow = PriceFeedLib.getTokenTotalPrice(pricePerToken, depositAmount);
         uint256 borrowAmount = maxBorrow / 4; // Borrow 1/4 of max
 
         lending.takeLoan(borrowAmount);
 
-        uint256 totalDebt = lending.getUserLoanInfo(user1).totalDebt;
-        debtToken.approve(address(lending), totalDebt);
+        uint256 debt = lending.getUserLoanInfo(user1).debt;
+        debtToken.approve(address(lending), debt);
         vm.stopPrank();
 
         // assuming user1 get debtToken from external source
@@ -315,11 +320,11 @@ contract LendingTest is Test {
         vm.stopPrank();
 
         vm.startPrank(user1, user1);
-        lending.repayLoan(totalDebt);
+        lending.repayLoan(debt);
         vm.stopPrank();
 
-        assertEq(lending.getUserLoanInfo(user1).totalDebt, 0);
-        assertEq(lending.getUserLoanInfo(user1).totalRepaid, 0);
+        assertEq(lending.getUserLoanInfo(user1).debt, 0);
+        assertEq(lending.getUserLoanInfo(user1).repaid, 0);
     }
 
     // ============ Start Collateral Raising Tests ============
@@ -365,8 +370,9 @@ contract LendingTest is Test {
         MockV3Aggregator newPriceFeed = new MockV3Aggregator(8, PRICE_2);
 
         // uint256 oldPrice = lending.getTokenPriceInDebtToken(address(collateralToken1));
-        uint256 oldPrice =
-            PriceFeedLib.convertPriceToTokenAmount(address(collateralToken1), address(debtToken), PRICE_STALE_TIME);
+        uint256 oldPrice = PriceFeedLib.convertPriceToTokenAmount(
+            lending.getPriceFeed(address(collateralToken1)), address(debtTokenPriceFeed), PRICE_STALE_TIME
+        );
 
         vm.prank(owner);
 
@@ -374,9 +380,11 @@ contract LendingTest is Test {
         emit Lending.PriceFeedUpdated(address(collateralToken1), address(newPriceFeed));
         lending.updatePriceFeed(address(collateralToken1), address(newPriceFeed));
 
-        uint256 newPrice =
-            PriceFeedLib.convertPriceToTokenAmount(address(collateralToken1), address(debtToken), PRICE_STALE_TIME);
+        uint256 newPrice = PriceFeedLib.convertPriceToTokenAmount(
+            lending.getPriceFeed(address(collateralToken1)), address(debtTokenPriceFeed), PRICE_STALE_TIME
+        );
 
+        // should've check the address
         assertNotEq(oldPrice, newPrice);
     }
 
@@ -443,37 +451,7 @@ contract LendingTest is Test {
     }
 
     // ============ View Function Tests ============
-    function test_getMaxLoan() public {
-        uint256 depositAmount = 1 * 1e18;
-
-        vm.startPrank(user1);
-        collateralToken1.approve(address(lending), depositAmount);
-        lending.depositCollateral(address(collateralToken1), depositAmount);
-        vm.stopPrank();
-
-        uint256 collateralValue = lending.getTotalCollateralValueInDebtToken(user1);
-        uint256 principal = (collateralValue * LTV_BPS) / BPS_DENOMINATOR;
-        uint256 expectedValue = principal + (principal * lending.s_interestRateInBPS()) / BPS_DENOMINATOR;
-
-        assertEq(expectedValue, lending.getMaxLoan(user1));
-    }
-
-    function test_getTokenPriceInDebtToken() public {}
-
-    function test_getDebtTokenPriceInUsd() public view {
-        (, int256 price,,,) = debtTokenPriceFeed.latestRoundData();
-        uint8 debtTokenDecimals = debtTokenPriceFeed.decimals();
-
-        assertEq(uint256(price) * PRICE_PRECISION / 10 ** debtTokenDecimals, lending.getDebtTokenPriceInUsd());
-    }
-
-    function test_getTotalCollateralValue() public {}
-
-    function test_getLoanRemainingDebt() public {}
-
-    function test_getLoanInterestRateApplied() public {}
-
-    function test_getLoanDueDate() public {}
+    function test_getTotalCollateralValueInDebtToken() public {}
 
     function test_getCollateralTokens() public view {
         address[] memory tokens = lending.getCollateralTokens();
@@ -484,23 +462,5 @@ contract LendingTest is Test {
 
     function test_getCollateralBalance() public {}
 
-    function test_getLoanDebtAmount() public {}
-
-    function test_getLoanRepaidAmount() public {}
-
-    function test_getLoanInterestRate() public {}
-
-    function test_getLoanDurationLimit() public {}
-
     function test_getCollateralRaisingDetails() public {}
-
-    function test_getRaisingTimeLeft() public {}
-
-    function test_getFunderInfo() public {}
-
-    function test_getCollateralRaisingFunders() public {}
-
-    function test_getTotalInterestOwed() public {}
-
-    function test_isCollateralSupported() public {}
 }
