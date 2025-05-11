@@ -7,6 +7,7 @@ import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {MockV3Aggregator} from "@chainlink/contracts/src/v0.8/tests/MockV3Aggregator.sol";
 import {MockAggregatorV3Interface} from "../mocks/MockAggregatorV3Interface.sol";
+import {MockUniswapV2Router} from "../mocks/MockUniswapV2Router.sol";
 import {PriceFeedLib} from "../../src/PriceFeedLib.sol";
 
 contract LendingTest is Test {
@@ -17,20 +18,22 @@ contract LendingTest is Test {
     MockV3Aggregator public priceFeed1;
     MockV3Aggregator public priceFeed2;
     MockAggregatorV3Interface public debtTokenPriceFeed;
+    MockUniswapV2Router public uniswapRouter;
 
     address public owner = makeAddr("owner");
     address public user1 = makeAddr("user1");
     address public user2 = makeAddr("user2");
 
+    // could just lending.CONSTANTNAME but this easier
     uint256 public constant PRICE_STALE_TIME = 24 hours;
     uint256 public constant INITIAL_INTEREST_RATE = 500; // 5% in BPS
     uint256 public constant LTV_BPS = 7000; // 70% LTV in BPS
+    uint16 public constant HEALTH_FACTOR_THRESHOLD_BPS = 10_000; // 100%
     uint256 public constant BPS_DENOMINATOR = 10_000;
     uint256 private constant PRICE_PRECISION = 1e18; // Used for inverse price calculations
     int256 public constant PRICE_1 = 2000 * 1e8; // $2000 with 8 decimals
     int256 public constant PRICE_2 = 1 * 1e8; // $1 with 8 decimals
     int256 public constant IDRX_USD_PRICE = 605000000000; // $0.0000605 with 8 decimals
-    address public constant UNISWAP_ROUTER_V2 = 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D;
 
     function setUp() public {
         vm.startPrank(owner);
@@ -47,8 +50,11 @@ contract LendingTest is Test {
         // Deploy mock price feed for debt token
         debtTokenPriceFeed = new MockAggregatorV3Interface(owner, IDRX_USD_PRICE, 8);
 
+        // Deploy mock uniswap
+        uniswapRouter = new MockUniswapV2Router();
+
         // Deploy lending contract
-        lending = new Lending(owner, address(debtToken), address(debtTokenPriceFeed), UNISWAP_ROUTER_V2);
+        lending = new Lending(owner, address(debtToken), address(debtTokenPriceFeed), address(uniswapRouter));
 
         // Add collateral tokens
         lending.addCollateralToken(address(collateralToken1), address(priceFeed1));
@@ -328,23 +334,439 @@ contract LendingTest is Test {
     }
 
     // ============ Start Collateral Raising Tests ============
+    function test_startCollateralRaising() public {
+        uint256 targetAmount = 1e18;
+        uint16 interestRate = 500; // 5%
+
+        vm.startPrank(user1, user1);
+        vm.expectEmit(true, true, true, true);
+        emit Lending.RaisingCollateral(user1, address(collateralToken1), targetAmount, interestRate);
+        lending.startCollateralRaising(address(collateralToken1), targetAmount, interestRate);
+        vm.stopPrank();
+
+        (
+            bool isOpen,
+            address collateral,
+            uint256 target,
+            uint256 repaid,
+            uint256 interestRateBPS,
+            address[] memory funders,
+        ) = lending.getUserCollateralRaisingInfo(user1);
+        assertTrue(isOpen);
+        assertEq(collateral, address(collateralToken1));
+        assertEq(target, targetAmount);
+        assertEq(repaid, 0);
+        assertEq(interestRateBPS, interestRate);
+        assertEq(funders.length, 0);
+    }
+
+    function test_startCollateralRaising_RevertIfAlreadyOpen() public {
+        uint256 targetAmount = 1e18;
+        uint16 interestRate = 500;
+
+        vm.startPrank(user1, user1);
+        lending.startCollateralRaising(address(collateralToken1), targetAmount, interestRate);
+        vm.expectRevert(Lending.Lending__CollateralRaisingAlreadyOpen.selector);
+        lending.startCollateralRaising(address(collateralToken1), targetAmount, interestRate);
+        vm.stopPrank();
+    }
+
+    function test_startCollateralRaising_RevertIfUnsupportedToken() public {
+        ERC20Mock unsupportedToken = new ERC20Mock();
+        vm.startPrank(user1, user1);
+        vm.expectRevert(Lending.Lending__CollateralNotSupported.selector);
+        lending.startCollateralRaising(address(unsupportedToken), 1e18, 500);
+        vm.stopPrank();
+    }
 
     // ============ Fund User Tests ============
+    function test_fundUser() public {
+        uint256 targetAmount = 1e18;
+        uint16 interestRate = 500;
+        uint256 fundAmount = 0.5e18;
 
-    // ============ Cancel Collateral Raising Tests ============
+        vm.startPrank(user1, user1);
+        lending.startCollateralRaising(address(collateralToken1), targetAmount, interestRate);
+        vm.stopPrank();
 
-    // ============ End Collateral Raising Tests ============
+        vm.startPrank(user2, user2);
+        collateralToken1.approve(address(lending), fundAmount);
+        vm.expectEmit(true, true, true, true);
+        emit Lending.CollateralFunded(user1, user2, fundAmount);
+        lending.fundUser(user1, fundAmount);
+        vm.stopPrank();
+
+        (,,, uint256 raised,, address[] memory funders, Lending.FunderInfo[] memory funderInfo) =
+            lending.getUserCollateralRaisingInfo(user1);
+        assertEq(raised, fundAmount);
+        assertEq(funders.length, 1);
+        assertEq(funderInfo[0].amount, fundAmount);
+    }
+
+    // ============ Close Collateral Raising Tests ============
+    function test_closeCollateralRaising() public {
+        uint256 targetAmount = 1e18;
+        uint16 interestRate = 500;
+
+        vm.startPrank(user1, user1);
+        lending.startCollateralRaising(address(collateralToken1), targetAmount, interestRate);
+        vm.stopPrank();
+
+        vm.startPrank(user2, user2);
+        collateralToken1.approve(address(lending), targetAmount);
+        lending.fundUser(user1, targetAmount);
+        vm.stopPrank();
+
+        vm.startPrank(user1, user1);
+        vm.expectEmit(true, true, true, true);
+        emit Lending.CollateralRaisingClosed(user1);
+        lending.closeCollateralRaising(user1);
+
+        uint256 userTokenBalance = lending.getCollateralBalance(address(collateralToken1));
+        vm.stopPrank();
+
+        (bool isOpen,,,,,,) = lending.getUserCollateralRaisingInfo(user1);
+        assertFalse(isOpen);
+        assertEq(userTokenBalance, targetAmount);
+    }
+
+    function test_closeCollateralRaising_RevertIfTargetNotMet() public {
+        uint256 targetAmount = 1e18;
+        uint16 interestRate = 500;
+
+        vm.startPrank(user1, user1);
+        lending.startCollateralRaising(address(collateralToken1), targetAmount, interestRate);
+        vm.stopPrank();
+
+        vm.startPrank(user2, user2);
+        vm.expectRevert(Lending.Lending__CollateralRaisingTargetNotMet.selector);
+        lending.closeCollateralRaising(user1); // Try to close without funding
+        vm.stopPrank();
+    }
+
+    function test_closeCollateralRaising_CanCloseIfOwnCCollateralRaising() public {
+        uint256 targetAmount = 1e18;
+        uint16 interestRate = 500;
+
+        vm.startPrank(user1, user1);
+        lending.startCollateralRaising(address(collateralToken1), targetAmount, interestRate);
+        lending.closeCollateralRaising(user1); // Try to close without funding
+        vm.stopPrank();
+
+        (bool open,,,,,,) = lending.getUserCollateralRaisingInfo(user1);
+        assertFalse(open);
+    }
 
     // ============ Repay Funder Collateral Tests ============
+    function test_repayFunder() public {
+        uint256 targetAmount = 1e18;
+        uint16 interestRate = 500; // 5%
+        uint256 fundAmount = 0.5e18;
 
-    // ============ Pay Funder Interest Tests ============
+        // Setup raising
+        vm.startPrank(user1, user1);
+        lending.startCollateralRaising(address(collateralToken1), targetAmount, interestRate);
+        vm.stopPrank();
+
+        // Fund
+        vm.startPrank(user2, user2);
+        collateralToken1.approve(address(lending), fundAmount);
+        lending.fundUser(user1, fundAmount);
+        vm.stopPrank();
+
+        // Close raising
+        vm.startPrank(user1, user1); // using user1 to bypass target check
+        lending.closeCollateralRaising(user1);
+        vm.stopPrank();
+
+        // Repay
+        uint256 collateralRepay = fundAmount / 2; // repay half
+        uint256 tokenValueInDebtToken =
+            PriceFeedLib.convertPriceToTokenAmount(address(priceFeed1), address(debtTokenPriceFeed), PRICE_STALE_TIME);
+        uint256 totalTokenValueInDebtToken = PriceFeedLib.getTokenTotalPrice(tokenValueInDebtToken, fundAmount);
+        uint256 totalInterest = ((totalTokenValueInDebtToken * interestRate) / BPS_DENOMINATOR);
+        uint256 interestRepay = totalInterest / 2; // repay half
+
+        // simulate user1 had debtToken balance to pay
+        vm.startPrank(owner);
+        debtToken.mint(user1, totalInterest);
+        vm.stopPrank();
+
+        vm.startPrank(user1);
+        collateralToken1.approve(address(lending), collateralRepay);
+        debtToken.approve(address(lending), interestRepay);
+
+        vm.expectEmit(true, true, true, true);
+        emit Lending.CollateralRepayment(user1, user2, collateralRepay);
+        vm.expectEmit(true, true, true, true);
+        emit Lending.InterestPaid(user1, user2, interestRepay);
+        lending.repayFunder(user2, collateralRepay, interestRepay);
+        vm.stopPrank();
+
+        (,,,,,, Lending.FunderInfo[] memory funderInfo) = lending.getUserCollateralRaisingInfo(user1);
+
+        assertEq(funderInfo[0].amount, fundAmount - collateralRepay);
+        assertEq(funderInfo[0].reward, totalInterest - interestRepay);
+    }
+
+    function test_repayFunder_CollateralOnly() public {
+        uint256 targetAmount = 1e18;
+        uint16 interestRate = 500; // 5%
+        uint256 fundAmount = 0.5e18;
+
+        // Setup raising
+        vm.startPrank(user1, user1);
+        lending.startCollateralRaising(address(collateralToken1), targetAmount, interestRate);
+        vm.stopPrank();
+
+        // Fund
+        vm.startPrank(user2, user2);
+        collateralToken1.approve(address(lending), fundAmount);
+        lending.fundUser(user1, fundAmount);
+        vm.stopPrank();
+
+        // Close raising
+        vm.startPrank(user1, user1); // using user1 to bypass target check
+        lending.closeCollateralRaising(user1);
+        vm.stopPrank();
+
+        // Repay
+        uint256 collateralRepay = fundAmount / 2; // repay half
+
+        vm.startPrank(user1);
+        collateralToken1.approve(address(lending), collateralRepay);
+
+        vm.expectEmit(true, true, true, true);
+        emit Lending.CollateralRepayment(user1, user2, collateralRepay);
+        lending.repayFunder(user2, collateralRepay, 0);
+        vm.stopPrank();
+
+        (,,,,,, Lending.FunderInfo[] memory funderInfo) = lending.getUserCollateralRaisingInfo(user1);
+
+        assertEq(funderInfo[0].amount, fundAmount - collateralRepay);
+    }
+
+    function test_repayFunder_InterestOnly() public {
+        uint256 targetAmount = 1e18;
+        uint16 interestRate = 500; // 5%
+        uint256 fundAmount = 0.5e18;
+
+        // Setup raising
+        vm.startPrank(user1, user1);
+        lending.startCollateralRaising(address(collateralToken1), targetAmount, interestRate);
+        vm.stopPrank();
+
+        // Fund
+        vm.startPrank(user2, user2);
+        collateralToken1.approve(address(lending), fundAmount);
+        lending.fundUser(user1, fundAmount);
+        vm.stopPrank();
+
+        // Close raising
+        vm.startPrank(user1, user1); // using user1 to bypass target check
+        lending.closeCollateralRaising(user1);
+        vm.stopPrank();
+
+        // Repay
+        uint256 tokenValueInDebtToken =
+            PriceFeedLib.convertPriceToTokenAmount(address(priceFeed1), address(debtTokenPriceFeed), PRICE_STALE_TIME);
+        uint256 totalTokenValueInDebtToken = PriceFeedLib.getTokenTotalPrice(tokenValueInDebtToken, fundAmount);
+        uint256 totalInterest = ((totalTokenValueInDebtToken * interestRate) / BPS_DENOMINATOR);
+        uint256 interestRepay = totalInterest / 2; // repay half
+
+        // simulate user1 had debtToken balance to pay
+        vm.startPrank(owner);
+        debtToken.mint(user1, totalInterest);
+        vm.stopPrank();
+
+        vm.startPrank(user1);
+        debtToken.approve(address(lending), interestRepay);
+
+        vm.expectEmit(true, true, true, true);
+        emit Lending.InterestPaid(user1, user2, interestRepay);
+        lending.repayFunder(user2, 0, interestRepay);
+        vm.stopPrank();
+
+        (,,,,,, Lending.FunderInfo[] memory funderInfo) = lending.getUserCollateralRaisingInfo(user1);
+
+        assertEq(funderInfo[0].amount, fundAmount);
+        assertEq(funderInfo[0].reward, totalInterest - interestRepay);
+    }
+
+    function test_repayFunder_RevertIfBothZero() public {
+        vm.startPrank(user1, user1);
+        vm.expectRevert(Lending.Lending__MustBeMoreThanZero.selector);
+        lending.repayFunder(user2, 0, 0);
+        vm.stopPrank();
+    }
 
     // ============ Liquidate Tests ============
+    function test_liquidate() public {
+        uint256 depositAmount = 1e18;
+
+        // Setup loan
+        vm.startPrank(user1, user1);
+        collateralToken1.approve(address(lending), depositAmount);
+        lending.depositCollateral(address(collateralToken1), depositAmount);
+        vm.stopPrank();
+
+        uint256 collateralValue = lending.getTotalCollateralValueInDebtToken(user1);
+        uint256 borrowAmount = collateralValue / 2; // borrow half collateral value
+
+        vm.startPrank(user1, user1);
+        lending.takeLoan(borrowAmount);
+        vm.stopPrank();
+
+        // Get initial loan details
+        Lending.Loan memory loan = lending.getUserLoanInfo(user1);
+        uint256 totalDebt = loan.debt - loan.repaid;
+
+        // Setup uniswap router
+        uniswapRouter.setMockRate(
+            address(collateralToken1),
+            address(debtToken),
+            PriceFeedLib.convertPriceToTokenAmount(address(priceFeed1), address(debtTokenPriceFeed), PRICE_STALE_TIME)
+        );
+
+        // Set uniswap liquidity reserve
+        uint256 reserve = 1000e18;
+        uniswapRouter.setMockReserves(address(collateralToken1), address(debtToken), reserve, reserve);
+        vm.startPrank(owner);
+        debtToken.mint(address(uniswapRouter), reserve);
+        vm.stopPrank();
+
+        // Make collateral value drop (price goes from $2000 to $500)
+        priceFeed1.updateAnswer(500e8);
+
+        // Calculate expected seized collateral amount
+        uint256 seizeAmount =
+            (totalDebt * (lending.BPS_DENOMINATOR() + lending.LIQUIDATION_PENALTY_BPS())) / lending.BPS_DENOMINATOR();
+
+        uint256 pricePerToken = PriceFeedLib.convertPriceToTokenAmount(
+            address(priceFeed1), address(debtTokenPriceFeed), lending.PRICE_STALE_TIME()
+        );
+
+        uint256 expectedCollateralSeized = PriceFeedLib.getTokenTotalPrice(pricePerToken, seizeAmount);
+
+        // Ensure we don't seize more than available
+        if (expectedCollateralSeized > depositAmount) {
+            expectedCollateralSeized = depositAmount;
+        }
+
+        // Update uniswap rate with new price
+        uniswapRouter.setMockRate(
+            address(collateralToken1),
+            address(debtToken),
+            PriceFeedLib.convertPriceToTokenAmount(address(priceFeed1), address(debtTokenPriceFeed), PRICE_STALE_TIME)
+        );
+
+        // Protocol state
+        uint256 protocolBalanceBeforeLiquidate = debtToken.balanceOf(address(lending));
+
+        // Liquidate with proper expectation
+        vm.startPrank(user2, user2);
+        vm.expectEmit(true, true, true, true);
+        emit Lending.Liquidated(user1, address(collateralToken1), expectedCollateralSeized);
+        lending.liquidate(user1, address(collateralToken1));
+        vm.stopPrank();
+
+        // Verify debt cleared and collateral taken
+        uint256 protocolBalanceAfterLiquidate = debtToken.balanceOf(address(lending));
+        vm.startPrank(user1);
+        uint256 user1CollateralBalance = lending.getCollateralBalance(address(collateralToken1));
+        vm.stopPrank();
+        Lending.Loan memory user1Loan = lending.getUserLoanInfo(user1);
+        assertGt(protocolBalanceAfterLiquidate, protocolBalanceBeforeLiquidate, "Protocol balance should be increased");
+        assertEq(user1Loan.debt, 0, "Debt not cleared");
+        assertEq(user1Loan.repaid, 0, "Repaid amount should be zero");
+        assertEq(user1Loan.dueDate, 0, "Due date not reset");
+        assertEq(user1CollateralBalance, depositAmount - expectedCollateralSeized, "Incorrect remaining collateral");
+    }
+
+    function test_liquidate_RevertIfHealthyPosition() public {
+        uint256 depositAmount = 1e18;
+
+        // Setup collateral and loan
+        vm.startPrank(user1, user1);
+        collateralToken1.approve(address(lending), depositAmount);
+        lending.depositCollateral(address(collateralToken1), depositAmount);
+        vm.stopPrank();
+
+        // Check initial collateral value
+        uint256 collateralValue = lending.getTotalCollateralValueInDebtToken(user1);
+        uint256 borrowAmount = collateralValue / 2; // Conservative LTV (50%)
+
+        // Take loan
+        vm.startPrank(user1, user1);
+        lending.takeLoan(borrowAmount);
+        vm.stopPrank();
+
+        // Verify health factor is healthy
+        uint256 healthFactor =
+            (collateralValue * LTV_BPS * HEALTH_FACTOR_THRESHOLD_BPS) / (borrowAmount * BPS_DENOMINATOR);
+
+        assertGt(healthFactor, lending.HEALTH_FACTOR_THRESHOLD_BPS(), "Position should be healthy");
+
+        // Verify loan is not overdue
+        Lending.Loan memory loan = lending.getUserLoanInfo(user1);
+        assertLt(block.timestamp, loan.dueDate, "Loan should not be overdue");
+
+        // Setup Uniswap mock (even though we expect revert)
+        uniswapRouter.setMockRate(
+            address(collateralToken1),
+            address(debtToken),
+            PriceFeedLib.convertPriceToTokenAmount(address(priceFeed1), address(debtTokenPriceFeed), PRICE_STALE_TIME)
+        );
+        uniswapRouter.setMockReserves(address(collateralToken1), address(debtToken), 1000e18, 1000e18);
+
+        // Attempt liquidation (should revert)
+        vm.startPrank(user2, user2);
+        vm.expectRevert(Lending.Lending__NotLiquidatable.selector);
+        lending.liquidate(user1, address(collateralToken1));
+        vm.stopPrank();
+
+        // Additional checks to ensure state unchanged
+        vm.startPrank(user1);
+        uint256 user1CollateralBalance = lending.getCollateralBalance(address(collateralToken1));
+        vm.stopPrank();
+        Lending.Loan memory postLoan = lending.getUserLoanInfo(user1);
+        assertEq(postLoan.debt, loan.debt, "Debt should not change");
+        assertEq(user1CollateralBalance, depositAmount, "Collateral should not be seized");
+    }
 
     // ============ Admin Function Tests ============
-    function test_depositDebtToken() public {}
+    function test_depositDebtToken() public {
+        uint256 amount = 1000e18;
+        uint256 initialBalance = debtToken.balanceOf(address(lending));
 
-    function test_withdrawDebtToken() public {}
+        vm.startPrank(owner);
+        debtToken.mint(owner, 2000e18);
+        debtToken.approve(address(lending), amount);
+        lending.depositDebtToken(amount);
+        vm.stopPrank();
+
+        assertEq(debtToken.balanceOf(address(lending)), initialBalance + amount);
+    }
+
+    function test_withdrawDebtToken() public {
+        uint256 amount = 1000e18;
+        uint256 initialOwnerBalance = debtToken.balanceOf(owner);
+
+        vm.startPrank(owner);
+        lending.withdrawDebtToken(amount);
+        vm.stopPrank();
+
+        assertEq(debtToken.balanceOf(owner), initialOwnerBalance + amount);
+    }
+
+    function test_withdrawDebtToken_RevertIfInsufficientBalance() public {
+        uint256 balance = debtToken.balanceOf(address(lending));
+
+        vm.startPrank(owner);
+        vm.expectRevert(Lending.Lending__InsufficientLiquidity.selector);
+        lending.withdrawDebtToken(balance + 1);
+        vm.stopPrank();
+    }
 
     function test_addCollateralToken() public {
         ERC20Mock newToken = new ERC20Mock();
@@ -451,7 +873,26 @@ contract LendingTest is Test {
     }
 
     // ============ View Function Tests ============
-    function test_getTotalCollateralValueInDebtToken() public {}
+    function test_getTotalCollateralValueInDebtToken() public {
+        uint256 depositAmount1 = 1e18;
+        uint256 depositAmount2 = 100e6; // 100 tokens with 6 decimals
+
+        vm.startPrank(user1);
+        collateralToken1.approve(address(lending), depositAmount1);
+        collateralToken2.approve(address(lending), depositAmount2);
+        lending.depositCollateral(address(collateralToken1), depositAmount1);
+        lending.depositCollateral(address(collateralToken2), depositAmount2);
+        vm.stopPrank();
+
+        uint256 token1ValueInDebtToken =
+            PriceFeedLib.convertPriceToTokenAmount(address(priceFeed1), address(debtTokenPriceFeed), PRICE_STALE_TIME);
+        uint256 token2ValueInDebtToken =
+            PriceFeedLib.convertPriceToTokenAmount(address(priceFeed2), address(debtTokenPriceFeed), PRICE_STALE_TIME);
+        uint256 expectedValue = PriceFeedLib.getTokenTotalPrice(token1ValueInDebtToken, depositAmount1)
+            + PriceFeedLib.getTokenTotalPrice(token2ValueInDebtToken, depositAmount2);
+
+        assertEq(lending.getTotalCollateralValueInDebtToken(user1), expectedValue);
+    }
 
     function test_getCollateralTokens() public view {
         address[] memory tokens = lending.getCollateralTokens();
@@ -460,7 +901,31 @@ contract LendingTest is Test {
         assertEq(tokens[1], address(collateralToken2));
     }
 
-    function test_getCollateralBalance() public {}
+    function test_getCollateralBalance() public {
+        uint256 depositAmount = 1e18;
 
-    function test_getCollateralRaisingDetails() public {}
+        vm.startPrank(user1);
+        collateralToken1.approve(address(lending), depositAmount);
+        lending.depositCollateral(address(collateralToken1), depositAmount);
+
+        uint256 userTokenBalance = lending.getCollateralBalance(address(collateralToken1));
+        vm.stopPrank();
+
+        assertEq(userTokenBalance, depositAmount);
+    }
+
+    function test_getCollateralRaisingDetails() public {
+        uint256 targetAmount = 1e18;
+        uint16 interestRate = 500;
+
+        vm.startPrank(user1, user1);
+        lending.startCollateralRaising(address(collateralToken1), targetAmount, interestRate);
+        vm.stopPrank();
+
+        (bool isOpen, address token, uint256 target,, uint256 rate,,) = lending.getUserCollateralRaisingInfo(user1);
+        assertTrue(isOpen);
+        assertEq(token, address(collateralToken1));
+        assertEq(target, targetAmount);
+        assertEq(rate, interestRate);
+    }
 }

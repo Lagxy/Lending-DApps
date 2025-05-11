@@ -279,18 +279,18 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
             uint256 raised,
             uint256 interestRateInBPS,
             address[] memory funders,
-        ) = getUserCollateralRaisingInfo(msg.sender);
+        ) = getUserCollateralRaisingInfo(_user);
         if (!open) revert Lending__CollateralRaisingAlreadyClosed();
         if (_user == address(0)) revert Lending__InvalidAddress();
 
-        // msg.sender allowed to close the raising before goal reached
+        // only msg.sender allowed to close the raising before reached targe
         if (msg.sender != _user) {
             if (raised < target) {
                 revert Lending__CollateralRaisingTargetNotMet();
             }
         }
 
-        s_collateralDeposited[_user][collateralToken] += s_collateralRaisings[_user].raised;
+        s_collateralDeposited[_user][collateralToken] += raised;
         uint256 pricePerToken = PriceFeedLib.convertPriceToTokenAmount(
             getPriceFeed(collateralToken), i_debtTokenPriceFeed, PRICE_STALE_TIME
         ); // i_debtTokenPriceFeed could use some view function
@@ -324,10 +324,11 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
         nonReentrant
         whenNotPaused
     {
-        if (_collateralAmount == 0 && _interestAmount == 0) revert Lending__MustBeMoreThanZero();
-        if (_funder == address(0)) revert Lending__InvalidAddress();
-
         CollateralRaising storage raising = s_collateralRaisings[msg.sender];
+
+        if (_collateralAmount == 0 && _interestAmount == 0) revert Lending__MustBeMoreThanZero();
+        if (raising.isOpen) revert Lending__CollateralRaisingTargetNotMet(); // still open (interest not calculated yet)
+        if (_funder == address(0)) revert Lending__InvalidAddress();
 
         // Handle collateral repayment
         if (_collateralAmount > 0) {
@@ -544,16 +545,15 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
     /**
      * @notice Calculate the health factor of a position
      * @param _user The address of the user to check
-     * @return The health factor as 18 decimal fixed point number
+     * @return healthFactor The health factor as 18 decimal fixed point number
      */
-    function _calculateHealthFactorBPS(address _user) internal view returns (uint256) {
+    function _calculateHealthFactorBPS(address _user) internal view returns (uint256 healthFactor) {
         uint256 collateralValue = getTotalCollateralValueInDebtToken(_user);
-        uint256 debtValue = getUserLoanInfo(_user).debt;
+        Loan memory loan = getUserLoanInfo(_user);
+        uint256 debtValue = loan.debt - loan.repaid;
 
         if (debtValue == 0) return type(uint256).max;
-
-        // may need price precision
-        return (collateralValue * LTV_BPS) / (debtValue * BPS_DENOMINATOR); // Maintain 18 decimals
+        healthFactor = (collateralValue * LTV_BPS * HEALTH_FACTOR_THRESHOLD_BPS) / (debtValue * BPS_DENOMINATOR);
     }
 
     /**
@@ -570,7 +570,8 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
 
         IUniswapV2Router02(i_uniswapRouter).swapExactTokensForTokens(
             _amount,
-            0, // Minimum amount out
+            0,
+            /// @dev the amount out currently set to 0 for testing purposes
             path,
             address(this),
             block.timestamp + 300
