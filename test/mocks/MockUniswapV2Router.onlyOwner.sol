@@ -28,7 +28,7 @@ contract MockUniswapV2Router is Ownable {
 
     event SwapExecuted(uint256 amountIn, uint256 amountOut, address[] path, address indexed to);
 
-    constructor() Ownable(msg.sender){}
+    constructor() Ownable(msg.sender) {}
 
     /**
      * @dev Set mock exchange rate between tokens (1e18 precision)
@@ -103,11 +103,19 @@ contract MockUniswapV2Router is Ownable {
 
     function pairFor(address tokenA, address tokenB) public view returns (address) {
         (address token0, address token1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
-        return address(uint160(uint256(keccak256(abi.encodePacked(
-            hex"ff",
-            address(this),
-            keccak256(abi.encodePacked(token0, token1)),
-            hex"96e8ac4277198ff8b6f785478aa9a39f403cb768dd02cbee326c3e7da348845f"
-        )))));
+        return address(
+            uint160(
+                uint256(
+                    keccak256(
+                        abi.encodePacked(
+                            hex"ff",
+                            address(this),
+                            keccak256(abi.encodePacked(token0, token1)),
+                            hex"96e8ac4277198ff8b6f785478aa9a39f403cb768dd02cbee326c3e7da348845f"
+                        )
+                    )
+                )
+            )
+        );
     }
 }

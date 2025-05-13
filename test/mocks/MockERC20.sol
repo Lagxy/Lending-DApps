@@ -15,7 +15,10 @@ contract MockERC20 is ERC20, Ownable {
      * @param symbol Symbol of the token
      * @param initialSupply Initial supply in wei
      */
-    constructor(string memory name, string memory symbol, uint256 initialSupply) ERC20(name, symbol) Ownable(msg.sender){
+    constructor(string memory name, string memory symbol, uint256 initialSupply)
+        ERC20(name, symbol)
+        Ownable(msg.sender)
+    {
         _mint(msg.sender, initialSupply);
     }
 
@@ -39,7 +42,7 @@ contract MockERC20 is ERC20, Ownable {
     /**
      * @dev Overriding 18 decimal to 2 decimal to simulate idrx decimal
      */
-    function decimals() public pure override returns(uint8) {
+    function decimals() public pure override returns (uint8) {
         return 2;
     }
 }
