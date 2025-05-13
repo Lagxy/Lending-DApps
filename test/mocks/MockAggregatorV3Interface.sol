@@ -17,10 +17,4 @@ contract MockAggregatorV3Interface is MockV3Aggregator, Ownable {
         price = _initialPrice;
         decimalPlaces = _decimals;
     }
-
-    // Set a new price to simulate updates (restricted to the owner)
-    function setPrice(int256 _newPrice) external onlyOwner {
-        price = _newPrice;
-        emit PriceUpdated(_newPrice);
-    }
 }

@@ -6,9 +6,9 @@ import {Lending} from "../src/Lending.sol";
 
 contract DeployLending is Script {
     function run() external {
-        address liskIdrx = 0xD63029C1a3dA68b51c67c6D1DeC3DEe50D681661;
+        address liskIdrx = 0x6cC49B2a44482486849DE370ae62Edfd794873B5;
         address mockPriceFeed = 0x14Fa23DEf3832dD489F08D7ad618928b3B237Cb8;
-        address uniswapRouterV2 = 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D;
+        address uniswapRouterV2 = 0x43f04D494c59E0014c7Ac9eA3308342A104b2508;
 
         vm.startBroadcast();
 

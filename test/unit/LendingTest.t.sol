@@ -33,7 +33,7 @@ contract LendingTest is Test {
     uint256 private constant PRICE_PRECISION = 1e18; // Used for inverse price calculations
     int256 public constant PRICE_1 = 2000 * 1e8; // $2000 with 8 decimals
     int256 public constant PRICE_2 = 1 * 1e8; // $1 with 8 decimals
-    int256 public constant IDRX_USD_PRICE = 605000000000; // $0.0000605 with 8 decimals
+    int256 public constant IDRX_USD_PRICE = 6050; // $0.0000605 with 8 decimals
 
     function setUp() public {
         vm.startPrank(owner);
@@ -322,7 +322,7 @@ contract LendingTest is Test {
 
         // assuming user1 get debtToken from external source
         vm.startPrank(owner);
-        debtToken.mint(user1, 100_000e18); // just random big value but can also use existing variable
+        debtToken.mint(user1, 100_000_000e18); // just random big value but can also use existing variable
         vm.stopPrank();
 
         vm.startPrank(user1, user1);
@@ -629,7 +629,7 @@ contract LendingTest is Test {
         );
 
         // Set uniswap liquidity reserve
-        uint256 reserve = 1000e18;
+        uint256 reserve = 100_000_000 * 1e18;
         uniswapRouter.setMockReserves(address(collateralToken1), address(debtToken), reserve, reserve);
         vm.startPrank(owner);
         debtToken.mint(address(uniswapRouter), reserve);
