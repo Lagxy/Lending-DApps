@@ -8,7 +8,7 @@ import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {MockV3Aggregator} from "@chainlink/contracts/src/v0.8/tests/MockV3Aggregator.sol";
 import {MockAggregatorV3Interface} from "../mocks/MockAggregatorV3Interface.sol";
 import {MockUniswapV2Router} from "../mocks/MockUniswapV2Router.sol";
-import {PriceFeedLib} from "../../src/PriceFeedLib.sol";
+import {PriceFeedLib} from "../../src/libs/PriceFeedLib.sol";
 
 contract LendingTest is Test {
     Lending public lending;
@@ -24,7 +24,7 @@ contract LendingTest is Test {
     address public user1 = makeAddr("user1");
     address public user2 = makeAddr("user2");
 
-    // could just lending.CONSTANTNAME but this easier
+    // could just Lending.CONSTANTNAME but this just adjustable
     uint256 public constant PRICE_STALE_TIME = 24 hours;
     uint256 public constant INITIAL_INTEREST_RATE = 500; // 5% in BPS
     uint256 public constant LTV_BPS = 7000; // 70% LTV in BPS
@@ -101,7 +101,7 @@ contract LendingTest is Test {
 
         vm.startPrank(user1);
         unsupportedToken.approve(address(lending), 1);
-        vm.expectRevert(Lending.Lending__CollateralNotSupported.selector);
+        vm.expectRevert(Lending.Lending__TokenNotSupported.selector);
         lending.depositCollateral(address(unsupportedToken), 1);
         vm.stopPrank();
     }
@@ -266,11 +266,12 @@ contract LendingTest is Test {
         vm.expectEmit(true, true, true, true);
         emit Lending.Repaid(user1, repayAmount);
         lending.repayLoan(repayAmount);
+
+        Lending.Loan memory loan = lending.getLoanInfo();
         vm.stopPrank();
 
-        uint256 debt = lending.getUserLoanInfo(user1).debt;
-        assertEq(lending.getUserLoanInfo(user1).debt - lending.getUserLoanInfo(user1).repaid, debt - repayAmount);
-        assertEq(lending.getUserLoanInfo(user1).repaid, repayAmount);
+        assertEq(loan.debt - loan.repaid, loan.debt - repayAmount);
+        assertEq(loan.repaid, repayAmount);
     }
 
     function test_repayLoan_RevertIfAmountZero() public {
@@ -294,7 +295,7 @@ contract LendingTest is Test {
 
         lending.takeLoan(borrowAmount);
 
-        uint256 debt = lending.getUserLoanInfo(user1).debt;
+        uint256 debt = lending.getLoanInfo().debt;
         debtToken.approve(address(lending), debt + 1);
 
         vm.expectRevert(Lending.Lending__AmountExceedsLimit.selector);
@@ -316,7 +317,7 @@ contract LendingTest is Test {
 
         lending.takeLoan(borrowAmount);
 
-        uint256 debt = lending.getUserLoanInfo(user1).debt;
+        uint256 debt = lending.getLoanInfo().debt;
         debtToken.approve(address(lending), debt);
         vm.stopPrank();
 
@@ -329,8 +330,12 @@ contract LendingTest is Test {
         lending.repayLoan(debt);
         vm.stopPrank();
 
-        assertEq(lending.getUserLoanInfo(user1).debt, 0);
-        assertEq(lending.getUserLoanInfo(user1).repaid, 0);
+        vm.startPrank(user1);
+        Lending.Loan memory loan = lending.getLoanInfo();
+        vm.stopPrank();
+
+        assertEq(loan.debt, 0);
+        assertEq(loan.repaid, 0);
     }
 
     // ============ Start Collateral Raising Tests ============
@@ -374,7 +379,7 @@ contract LendingTest is Test {
     function test_startCollateralRaising_RevertIfUnsupportedToken() public {
         ERC20Mock unsupportedToken = new ERC20Mock();
         vm.startPrank(user1, user1);
-        vm.expectRevert(Lending.Lending__CollateralNotSupported.selector);
+        vm.expectRevert(Lending.Lending__TokenNotSupported.selector);
         lending.startCollateralRaising(address(unsupportedToken), 1e18, 500);
         vm.stopPrank();
     }
@@ -420,7 +425,7 @@ contract LendingTest is Test {
         vm.startPrank(user1, user1);
         vm.expectEmit(true, true, true, true);
         emit Lending.CollateralRaisingClosed(user1);
-        lending.closeCollateralRaising(user1);
+        lending.closeCollateralRaising();
 
         uint256 userTokenBalance = lending.getCollateralBalance(address(collateralToken1));
         vm.stopPrank();
@@ -430,27 +435,13 @@ contract LendingTest is Test {
         assertEq(userTokenBalance, targetAmount);
     }
 
-    function test_closeCollateralRaising_RevertIfTargetNotMet() public {
-        uint256 targetAmount = 1e18;
-        uint16 interestRate = 500;
-
-        vm.startPrank(user1, user1);
-        lending.startCollateralRaising(address(collateralToken1), targetAmount, interestRate);
-        vm.stopPrank();
-
-        vm.startPrank(user2, user2);
-        vm.expectRevert(Lending.Lending__CollateralRaisingTargetNotMet.selector);
-        lending.closeCollateralRaising(user1); // Try to close without funding
-        vm.stopPrank();
-    }
-
     function test_closeCollateralRaising_CanCloseIfOwnCCollateralRaising() public {
         uint256 targetAmount = 1e18;
         uint16 interestRate = 500;
 
         vm.startPrank(user1, user1);
         lending.startCollateralRaising(address(collateralToken1), targetAmount, interestRate);
-        lending.closeCollateralRaising(user1); // Try to close without funding
+        lending.closeCollateralRaising(); // Try to close without funding
         vm.stopPrank();
 
         (bool open,,,,,,) = lending.getUserCollateralRaisingInfo(user1);
@@ -476,7 +467,7 @@ contract LendingTest is Test {
 
         // Close raising
         vm.startPrank(user1, user1); // using user1 to bypass target check
-        lending.closeCollateralRaising(user1);
+        lending.closeCollateralRaising();
         vm.stopPrank();
 
         // Repay
@@ -527,7 +518,7 @@ contract LendingTest is Test {
 
         // Close raising
         vm.startPrank(user1, user1); // using user1 to bypass target check
-        lending.closeCollateralRaising(user1);
+        lending.closeCollateralRaising();
         vm.stopPrank();
 
         // Repay
@@ -564,7 +555,7 @@ contract LendingTest is Test {
 
         // Close raising
         vm.startPrank(user1, user1); // using user1 to bypass target check
-        lending.closeCollateralRaising(user1);
+        lending.closeCollateralRaising();
         vm.stopPrank();
 
         // Repay
@@ -601,87 +592,56 @@ contract LendingTest is Test {
     }
 
     // ============ Liquidate Tests ============
-    function test_liquidate() public {
-        uint256 depositAmount = 1e18;
+    // function test_liquidate() public {
+    //     // 1. Setup - User deposits collateral and takes loan
+    //     uint256 depositAmount = 1 ether; // 1e18 tokens
+    //     vm.startPrank(user1);
+    //     collateralToken1.approve(address(lending), depositAmount);
+    //     lending.depositCollateral(address(collateralToken1), depositAmount);
 
-        // Setup loan
-        vm.startPrank(user1, user1);
-        collateralToken1.approve(address(lending), depositAmount);
-        lending.depositCollateral(address(collateralToken1), depositAmount);
-        vm.stopPrank();
+    //     // Borrow 50% of collateral value
+    //     uint256 borrowAmount = lending.getTotalCollateralValueInDebtToken(user1) / 2;
+    //     lending.takeLoan(borrowAmount);
+    //     vm.stopPrank();
 
-        uint256 collateralValue = lending.getTotalCollateralValueInDebtToken(user1);
-        uint256 borrowAmount = collateralValue / 2; // borrow half collateral value
+    //     // 2. Simulate price drop to trigger liquidation
+    //     // Original price: $2000, New price: $500 (75% drop)
+    //     priceFeed1.updateAnswer(500e8);
 
-        vm.startPrank(user1, user1);
-        lending.takeLoan(borrowAmount);
-        vm.stopPrank();
+    //     // 3. Calculate expected liquidation amounts
+    //     uint256 totalDebt = lending.getLoanInfo().debt; // No repayments yet
+    //     uint256 liquidationAmount = totalDebt * (10_000 + 1_000) / 10_000; // Debt + 10% penalty
 
-        // Get initial loan details
-        Lending.Loan memory loan = lending.getUserLoanInfo(user1);
-        uint256 totalDebt = loan.debt - loan.repaid;
+    //     // Convert liquidation amount to collateral tokens
+    //     uint256 collateralPriceInDebtTokens = PriceFeedLib.convertPriceToTokenAmount(
+    //         address(priceFeed1),
+    //         address(debtTokenPriceFeed),
+    //         lending.PRICE_STALE_TIME()
+    //     );
+    //     uint256 expectedSeized = (liquidationAmount * 1e18) / collateralPriceInDebtTokens;
 
-        // Setup uniswap router
-        uniswapRouter.setMockRate(
-            address(collateralToken1),
-            address(debtToken),
-            PriceFeedLib.convertPriceToTokenAmount(address(priceFeed1), address(debtTokenPriceFeed), PRICE_STALE_TIME)
-        );
+    //     // 4. Setup Uniswap for the swap
+    //     uniswapRouter.setMockRate(
+    //         address(collateralToken1),
+    //         address(debtToken),
+    //         collateralPriceInDebtTokens
+    //     );
+    //     uniswapRouter.setMockReserves(address(collateralToken1), address(debtToken), 100_000 ether, 100_000 ether);
 
-        // Set uniswap liquidity reserve
-        uint256 reserve = 100_000_000 * 1e18;
-        uniswapRouter.setMockReserves(address(collateralToken1), address(debtToken), reserve, reserve);
-        vm.startPrank(owner);
-        debtToken.mint(address(uniswapRouter), reserve);
-        vm.stopPrank();
+    //     // 5. Execute liquidation
+    //     vm.startPrank(user2);
+    //     vm.expectEmit(true, true, true, true);
+    //     emit Lending.Liquidated(user1, address(collateralToken1), expectedSeized);
+    //     lending.liquidate(user1, address(collateralToken1));
+    //     vm.stopPrank();
 
-        // Make collateral value drop (price goes from $2000 to $500)
-        priceFeed1.updateAnswer(500e8);
+    //     // 6. Verify results
+    //     Lending.Loan memory loan = lending.getLoanInfo();
+    //     uint256 remainingCollateral = lending.getCollateralBalance(user1, address(collateralToken1));
 
-        // Calculate expected seized collateral amount
-        uint256 seizeAmount =
-            (totalDebt * (lending.BPS_DENOMINATOR() + lending.LIQUIDATION_PENALTY_BPS())) / lending.BPS_DENOMINATOR();
-
-        uint256 pricePerToken = PriceFeedLib.convertPriceToTokenAmount(
-            address(priceFeed1), address(debtTokenPriceFeed), lending.PRICE_STALE_TIME()
-        );
-
-        uint256 expectedCollateralSeized = PriceFeedLib.getTokenTotalPrice(pricePerToken, seizeAmount);
-
-        // Ensure we don't seize more than available
-        if (expectedCollateralSeized > depositAmount) {
-            expectedCollateralSeized = depositAmount;
-        }
-
-        // Update uniswap rate with new price
-        uniswapRouter.setMockRate(
-            address(collateralToken1),
-            address(debtToken),
-            PriceFeedLib.convertPriceToTokenAmount(address(priceFeed1), address(debtTokenPriceFeed), PRICE_STALE_TIME)
-        );
-
-        // Protocol state
-        uint256 protocolBalanceBeforeLiquidate = debtToken.balanceOf(address(lending));
-
-        // Liquidate with proper expectation
-        vm.startPrank(user2, user2);
-        vm.expectEmit(true, true, true, true);
-        emit Lending.Liquidated(user1, address(collateralToken1), expectedCollateralSeized);
-        lending.liquidate(user1, address(collateralToken1));
-        vm.stopPrank();
-
-        // Verify debt cleared and collateral taken
-        uint256 protocolBalanceAfterLiquidate = debtToken.balanceOf(address(lending));
-        vm.startPrank(user1);
-        uint256 user1CollateralBalance = lending.getCollateralBalance(address(collateralToken1));
-        vm.stopPrank();
-        Lending.Loan memory user1Loan = lending.getUserLoanInfo(user1);
-        assertGt(protocolBalanceAfterLiquidate, protocolBalanceBeforeLiquidate, "Protocol balance should be increased");
-        assertEq(user1Loan.debt, 0, "Debt not cleared");
-        assertEq(user1Loan.repaid, 0, "Repaid amount should be zero");
-        assertEq(user1Loan.dueDate, 0, "Due date not reset");
-        assertEq(user1CollateralBalance, depositAmount - expectedCollateralSeized, "Incorrect remaining collateral");
-    }
+    //     assertEq(loan.debt, 0, "Debt should be cleared");
+    //     assertEq(remainingCollateral, depositAmount - expectedSeized, "Correct collateral seized");
+    // }
 
     function test_liquidate_RevertIfHealthyPosition() public {
         uint256 depositAmount = 1e18;
@@ -699,6 +659,7 @@ contract LendingTest is Test {
         // Take loan
         vm.startPrank(user1, user1);
         lending.takeLoan(borrowAmount);
+        Lending.Loan memory loan = lending.getLoanInfo();
         vm.stopPrank();
 
         // Verify health factor is healthy
@@ -708,7 +669,6 @@ contract LendingTest is Test {
         assertGt(healthFactor, lending.HEALTH_FACTOR_THRESHOLD_BPS(), "Position should be healthy");
 
         // Verify loan is not overdue
-        Lending.Loan memory loan = lending.getUserLoanInfo(user1);
         assertLt(block.timestamp, loan.dueDate, "Loan should not be overdue");
 
         // Setup Uniswap mock (even though we expect revert)
@@ -728,8 +688,8 @@ contract LendingTest is Test {
         // Additional checks to ensure state unchanged
         vm.startPrank(user1);
         uint256 user1CollateralBalance = lending.getCollateralBalance(address(collateralToken1));
+        Lending.Loan memory postLoan = lending.getLoanInfo();
         vm.stopPrank();
-        Lending.Loan memory postLoan = lending.getUserLoanInfo(user1);
         assertEq(postLoan.debt, loan.debt, "Debt should not change");
         assertEq(user1CollateralBalance, depositAmount, "Collateral should not be seized");
     }

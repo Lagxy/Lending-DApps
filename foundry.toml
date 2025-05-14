@@ -1,7 +1,7 @@
 [profile.default]
 src = "src"
 out = "out"
-libs = ["lib"]
+libs = ["lib", "interfaces"]
 gas_reports = ["Lending"]
 
 remappings = ["@openzeppelin=lib/openzeppelin-contracts", "@chainlink=lib/chainlink-brownie-contracts", "@uniswap/v2-periphery=lib/v2-periphery"]
