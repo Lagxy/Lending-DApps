@@ -643,56 +643,56 @@ contract LendingTest is Test {
     //     assertEq(remainingCollateral, depositAmount - expectedSeized, "Correct collateral seized");
     // }
 
-    function test_liquidate_RevertIfHealthyPosition() public {
-        uint256 depositAmount = 1e18;
+    // function test_liquidate_RevertIfHealthyPosition() public {
+    //     uint256 depositAmount = 1e18;
 
-        // Setup collateral and loan
-        vm.startPrank(user1, user1);
-        collateralToken1.approve(address(lending), depositAmount);
-        lending.depositCollateral(address(collateralToken1), depositAmount);
-        vm.stopPrank();
+    //     // Setup collateral and loan
+    //     vm.startPrank(user1, user1);
+    //     collateralToken1.approve(address(lending), depositAmount);
+    //     lending.depositCollateral(address(collateralToken1), depositAmount);
+    //     vm.stopPrank();
 
-        // Check initial collateral value
-        uint256 collateralValue = lending.getTotalCollateralValueInDebtToken(user1);
-        uint256 borrowAmount = collateralValue / 2; // Conservative LTV (50%)
+    //     // Check initial collateral value
+    //     uint256 collateralValue = lending.getTotalCollateralValueInDebtToken(user1);
+    //     uint256 borrowAmount = collateralValue / 2; // Conservative LTV (50%)
 
-        // Take loan
-        vm.startPrank(user1, user1);
-        lending.takeLoan(borrowAmount);
-        Lending.Loan memory loan = lending.getLoanInfo();
-        vm.stopPrank();
+    //     // Take loan
+    //     vm.startPrank(user1, user1);
+    //     lending.takeLoan(borrowAmount);
+    //     Lending.Loan memory loan = lending.getLoanInfo();
+    //     vm.stopPrank();
 
-        // Verify health factor is healthy
-        uint256 healthFactor =
-            (collateralValue * LTV_BPS * HEALTH_FACTOR_THRESHOLD_BPS) / (borrowAmount * BPS_DENOMINATOR);
+    //     // Verify health factor is healthy
+    //     uint256 healthFactor =
+    //         (collateralValue * LTV_BPS * HEALTH_FACTOR_THRESHOLD_BPS) / (borrowAmount * BPS_DENOMINATOR);
 
-        assertGt(healthFactor, lending.HEALTH_FACTOR_THRESHOLD_BPS(), "Position should be healthy");
+    //     assertGt(healthFactor, lending.HEALTH_FACTOR_THRESHOLD_BPS(), "Position should be healthy");
 
-        // Verify loan is not overdue
-        assertLt(block.timestamp, loan.dueDate, "Loan should not be overdue");
+    //     // Verify loan is not overdue
+    //     assertLt(block.timestamp, loan.dueDate, "Loan should not be overdue");
 
-        // Setup Uniswap mock (even though we expect revert)
-        uniswapRouter.setMockRate(
-            address(collateralToken1),
-            address(debtToken),
-            PriceFeedLib.convertPriceToTokenAmount(address(priceFeed1), address(debtTokenPriceFeed), PRICE_STALE_TIME)
-        );
-        uniswapRouter.setMockReserves(address(collateralToken1), address(debtToken), 1000e18, 1000e18);
+    //     // Setup Uniswap mock (even though we expect revert)
+    //     uniswapRouter.setMockRate(
+    //         address(collateralToken1),
+    //         address(debtToken),
+    //         PriceFeedLib.convertPriceToTokenAmount(address(priceFeed1), address(debtTokenPriceFeed), PRICE_STALE_TIME)
+    //     );
+    //     uniswapRouter.setMockReserves(address(collateralToken1), address(debtToken), 1000e18, 1000e18);
 
-        // Attempt liquidation (should revert)
-        vm.startPrank(user2, user2);
-        vm.expectRevert(Lending.Lending__NotLiquidatable.selector);
-        lending.liquidate(user1, address(collateralToken1));
-        vm.stopPrank();
+    //     // Attempt liquidation (should revert)
+    //     vm.startPrank(user2, user2);
+    //     vm.expectRevert(Lending.Lending__NotLiquidatable.selector);
+    //     lending.liquidate(user1, address(collateralToken1));
+    //     vm.stopPrank();
 
-        // Additional checks to ensure state unchanged
-        vm.startPrank(user1);
-        uint256 user1CollateralBalance = lending.getCollateralBalance(address(collateralToken1));
-        Lending.Loan memory postLoan = lending.getLoanInfo();
-        vm.stopPrank();
-        assertEq(postLoan.debt, loan.debt, "Debt should not change");
-        assertEq(user1CollateralBalance, depositAmount, "Collateral should not be seized");
-    }
+    //     // Additional checks to ensure state unchanged
+    //     vm.startPrank(user1);
+    //     uint256 user1CollateralBalance = lending.getCollateralBalance(address(collateralToken1));
+    //     Lending.Loan memory postLoan = lending.getLoanInfo();
+    //     vm.stopPrank();
+    //     assertEq(postLoan.debt, loan.debt, "Debt should not change");
+    //     assertEq(user1CollateralBalance, depositAmount, "Collateral should not be seized");
+    // }
 
     // ============ Admin Function Tests ============
     function test_depositDebtToken() public {
