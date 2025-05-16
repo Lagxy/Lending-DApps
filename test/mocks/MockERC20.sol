@@ -9,17 +9,20 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
  * @dev Simple ERC20 Token for testing purposes
  */
 contract MockERC20 is ERC20, Ownable {
+    uint8 immutable i_decimals;
+
     /**
      * @dev Constructor that gives msg.sender all of the initial supply.
      * @param name Name of the token
      * @param symbol Symbol of the token
      * @param initialSupply Initial supply in wei
      */
-    constructor(string memory name, string memory symbol, uint256 initialSupply)
+    constructor(string memory name, string memory symbol, uint256 initialSupply, uint8 _decimals)
         ERC20(name, symbol)
         Ownable(msg.sender)
     {
         _mint(msg.sender, initialSupply);
+        i_decimals = _decimals;
     }
 
     /**
@@ -42,7 +45,7 @@ contract MockERC20 is ERC20, Ownable {
     /**
      * @dev Overriding 18 decimal to 2 decimal to simulate idrx decimal
      */
-    function decimals() public pure override returns (uint8) {
-        return 2;
+    function decimals() public view override returns (uint8) {
+        return i_decimals;
     }
 }

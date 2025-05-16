@@ -25,7 +25,8 @@ library PriceFeedLib {
         return decimals < 18 ? value * (10 ** (18 - decimals)) : value / (10 ** (decimals - 18));
     }
 
-    // price token _feedFrom against _feedTo
+    /// @return tokenAmount value with 18 decimals
+    /// @dev interpret as 1 token _feedFrom = tokenAmount of _feedTo
     function convertPriceToTokenAmount(address _feedFrom, address _feedTo, uint256 staleTime)
         internal
         view
@@ -41,7 +42,14 @@ library PriceFeedLib {
         tokenAmount = (priceFrom * 1e18) / priceTo;
     }
 
-    function getTokenTotalPrice(uint256 price, uint256 amount) internal pure returns (uint256) {
-        return (price * amount) / 1e18;
+    function getTokenTotalPrice(uint256 price, uint256 tokenAmount, uint8 priceDecimals, uint8 tokenDecimals)
+        internal
+        pure
+        returns (uint256)
+    {
+        uint256 scaledPrice = scaleTo18Decimals(price, priceDecimals);
+        uint256 scaledTokenAmount = scaleTo18Decimals(tokenAmount, tokenDecimals);
+
+        return (scaledPrice * scaledTokenAmount) / 1e18;
     }
 }

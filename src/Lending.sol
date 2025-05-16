@@ -23,8 +23,6 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
     // ==============================================
     // Events
     // ==============================================
-    event CollateralDeposited(address indexed user, address indexed token, uint256 amount);
-    event CollateralWithdrawn(address indexed user, address indexed token, uint256 amount);
     event Borrowed(address indexed user, uint256 amount, uint256 totalDebt);
     event Repaid(address indexed user, uint256 amount);
     event CollateralTokenAdded(address indexed token, address priceFeed);
@@ -86,6 +84,7 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
     // ==============================================
     // Constants
     // ==============================================
+    uint8 public constant DEFAULT_DECIMALS = 18;
     uint16 public constant BPS_DENOMINATOR = 10_000;
     uint24 public constant PRICE_STALE_TIME = 24 hours;
     uint16 public constant LTV_BPS = 7000; // 70% LTV ratio in BPS (adjustable before deployment)
@@ -123,6 +122,7 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
         Ownable(initialOwner)
     {
         i_debtToken = _debtToken;
+        s_tokenDecimals[_debtToken] = IERC20WithDecimals(_debtToken).decimals();
         i_debtTokenPriceFeed = _debtTokenPriceFeed;
         i_uniswapRouter = _uniswapRouter;
 
@@ -138,7 +138,7 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
      * @notice Deposit collateral tokens to secure a loan
      * @param _token The address of the collateral token to deposit
      * @param _amount The amount of tokens to deposit
-     * @dev The token must be supported as collateral and amount must be > 0, emit CollateralDeposited event
+     * @dev The token must be supported as collateral and amount must be > 0
      */
     function depositCollateral(address _token, uint256 _amount) external nonReentrant whenNotPaused {
         if (s_priceFeeds[_token] == address(0)) revert Lending__TokenNotSupported();
@@ -147,15 +147,13 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
 
         IERC20(_token).safeTransferFrom(msg.sender, address(this), _amount);
         s_collateralDeposited[msg.sender][_token] += _amount;
-
-        emit CollateralDeposited(msg.sender, _token, _amount);
     }
 
     /**
      * @notice Withdraw deposited collateral tokens
      * @param _token The address of the collateral token to withdraw
      * @param _amount The amount of tokens to withdraw
-     * @dev Requires no outstanding debt and maintains LTV ratio, emit CollateralWithdrawn event
+     * @dev Requires no outstanding debt and maintains LTV ratio
      */
     function withdrawCollateral(address _token, uint256 _amount) external nonReentrant whenNotPaused {
         if (_getUserLoanInfo(msg.sender).debt > 0) revert Lending__OutstandingDebt();
@@ -166,8 +164,6 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
 
         s_collateralDeposited[msg.sender][_token] -= _amount;
         IERC20(_token).safeTransfer(msg.sender, _amount);
-
-        emit CollateralWithdrawn(msg.sender, _token, _amount);
     }
 
     /**
@@ -291,6 +287,8 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
         uint256 raised = raising.raised;
         uint256 interestRateInBPS = raising.interestRateInBPS;
         address[] memory funders = raising.funders;
+        uint8 debtTokenDecimals = s_tokenDecimals[i_debtToken];
+        uint8 collateralTokenDecimals = s_tokenDecimals[raising.collateralToken];
 
         raising.isOpen = false;
         s_collateralDeposited[msg.sender][collateralToken] += raised;
@@ -302,10 +300,13 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
         uint256 funderLength = funders.length;
         for (uint256 i = 0; i < funderLength;) {
             FunderInfo storage funderInfo = raising.funderInfo[funders[i]];
-            uint256 amountFunded = funderInfo.amount;
+            uint256 reward = (
+                PriceFeedLib.getTokenTotalPrice(
+                    pricePerToken, funderInfo.amount, DEFAULT_DECIMALS, collateralTokenDecimals
+                ) * interestRateInBPS
+            ) / BPS_DENOMINATOR;
 
-            funderInfo.reward =
-                (PriceFeedLib.getTokenTotalPrice(pricePerToken, amountFunded) * interestRateInBPS) / BPS_DENOMINATOR;
+            funderInfo.reward += _normalizeAmount(reward, DEFAULT_DECIMALS, debtTokenDecimals);
 
             unchecked {
                 i++;
@@ -357,50 +358,57 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
      * @param _user The address of user to liquidate
      * @param _token The address of collateral token to liquidate
      */
-    // function liquidate(address _user, address _token) external nonReentrant whenNotPaused noFlashLoans {
-    //     if (_user == address(0) || _token == address(0)) revert Lending__InvalidAddress();
-    //     address collateralPriceFeed = s_priceFeeds[_token];
-    //     if (collateralPriceFeed == address(0)) revert Lending__TokenNotSupported();
+    function liquidate(address _user, address _token) external nonReentrant whenNotPaused noFlashLoans {
+        if (_user == address(0) || _token == address(0)) revert Lending__InvalidAddress();
+        address collateralPriceFeed = s_priceFeeds[_token];
+        if (collateralPriceFeed == address(0)) revert Lending__TokenNotSupported();
 
-    //     Loan storage loan = s_loans[_user];
-    //     uint256 totalDebt = loan.debt - loan.repaid;
-    //     if (totalDebt == 0) revert Lending__NotLiquidatable();
+        Loan storage loan = s_loans[_user];
+        uint256 totalDebt = loan.debt - loan.repaid;
+        if (totalDebt == 0) revert Lending__NotLiquidatable();
 
-    //     uint256 healthFactor = _calculateHealthFactorBPS(_user);
-    //     if (healthFactor >= HEALTH_FACTOR_THRESHOLD_BPS && loan.dueDate > block.timestamp) {
-    //         revert Lending__NotLiquidatable();
-    //     }
+        if (_calculateHealthFactorBPS(_user) >= HEALTH_FACTOR_THRESHOLD_BPS && loan.dueDate > block.timestamp) {
+            revert Lending__NotLiquidatable();
+        }
 
-    //     uint256 userCollateral = s_collateralDeposited[_user][_token];
-    //     if (userCollateral == 0) revert Lending__NotLiquidatable();
+        uint8 debtTokenDecimals = s_tokenDecimals[address(i_debtToken)];
+        uint8 collateralDecimals = s_tokenDecimals[_token];
+        // scale to 18 decimals
+        uint256 userCollateral =
+            _normalizeAmount(s_collateralDeposited[_user][_token], collateralDecimals, DEFAULT_DECIMALS);
+        if (userCollateral == 0) revert Lending__NotLiquidatable();
 
-    //     uint8 debtTokenDecimals = s_tokenDecimals[address(i_debtToken)];
-    //     uint8 collateralDecimals = s_tokenDecimals[_token];
+        // totalToRecover in debt token using debt token decimals
+        uint256 totalToRecoverNormalized = _normalizeAmount(
+            (totalDebt * (BPS_DENOMINATOR + LIQUIDATION_PENALTY_BPS)) / BPS_DENOMINATOR,
+            debtTokenDecimals,
+            DEFAULT_DECIMALS
+        );
 
-    //     uint256 totalToRecover = (totalDebt * (BPS_DENOMINATOR + LIQUIDATION_PENALTY_BPS)) / BPS_DENOMINATOR;
+        // Get price of 1 collateral token in debt tokens (scaled to 1e18)
+        uint256 debtTokensPerCollateral =
+            PriceFeedLib.convertPriceToTokenAmount(collateralPriceFeed, i_debtTokenPriceFeed, PRICE_STALE_TIME);
 
-    //     // Get price of 1 collateral token in debt tokens (scaled to 1e18)
-    //     uint256 debtTokensPerCollateral = PriceFeedLib.convertPriceToTokenAmount(
-    //         collateralPriceFeed,
-    //         i_debtTokenPriceFeed,
-    //         PRICE_STALE_TIME
-    //     );
+        // normalize to 18 decimals before swap (because uniswap require so)
+        uint256 amountCollateralToSeize =
+            (totalToRecoverNormalized * (10 ** DEFAULT_DECIMALS)) / debtTokensPerCollateral;
 
-    //     // Calculate collateral to seize: (totalToRecover * 1e18) / debtTokensPerCollateral
-    //     // Then adjust from 18 decimals to collateral's decimals
-    //     uint256 amountCollateralToSeize = (totalToRecover * 10**(18 - debtTokenDecimals + collateralDecimals)) / debtTokensPerCollateral;
+        if (amountCollateralToSeize > userCollateral) {
+            amountCollateralToSeize = userCollateral;
+            // increment repaid instead of clearing the debt if the collateral value cant clear the debt
+            uint256 collateralValueInDebtToken = PriceFeedLib.getTokenTotalPrice(
+                debtTokensPerCollateral, amountCollateralToSeize, DEFAULT_DECIMALS, DEFAULT_DECIMALS
+            );
+            loan.repaid += _normalizeAmount(collateralValueInDebtToken, DEFAULT_DECIMALS, debtTokenDecimals);
+        } else {
+            _resetDebt(_user);
+        }
 
-    //     if (amountCollateralToSeize > userCollateral) {
-    //         amountCollateralToSeize = userCollateral;
-    //     }
+        s_collateralDeposited[_user][_token] -= amountCollateralToSeize;
+        _swapCollateralToDebtToken(_token, amountCollateralToSeize);
 
-    //     s_collateralDeposited[_user][_token] -= amountCollateralToSeize;
-    //     _resetDebt(_user);
-
-    //     _swapCollateralToDebtToken(_token, amountCollateralToSeize);
-
-    //     emit Liquidated(_user, _token, amountCollateralToSeize);
-    // }
+        emit Liquidated(_user, _token, amountCollateralToSeize);
+    }
 
     /**
      * @notice Reset a collateral raising detail to zero
@@ -608,11 +616,6 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
         );
     }
 
-    function _getDebtTokenPriceInUsd() internal view returns (uint256) {
-        PriceFeedLib.PriceData memory debt = PriceFeedLib.getNormalizedPrice(i_debtTokenPriceFeed, PRICE_STALE_TIME);
-        return PriceFeedLib.scaleTo18Decimals(debt.value, debt.decimals);
-    }
-
     // ==============================================
     // View Functions
     // ==============================================
@@ -634,6 +637,7 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
 
         uint256 collateralTokenLength = s_collateralTokens.length;
         uint8 debtTokenDecimals = IERC20WithDecimals(i_debtToken).decimals();
+        address debtTokenPriceFeed = i_debtTokenPriceFeed;
 
         for (uint256 i = 0; i < collateralTokenLength;) {
             address token = s_collateralTokens[i];
@@ -643,11 +647,13 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
                 if (s_priceFeeds[token] == address(0)) revert Lending__PriceFeedNotAvailable();
 
                 uint256 tokenPrice =
-                    PriceFeedLib.convertPriceToTokenAmount(s_priceFeeds[token], i_debtTokenPriceFeed, PRICE_STALE_TIME);
+                    PriceFeedLib.convertPriceToTokenAmount(s_priceFeeds[token], debtTokenPriceFeed, PRICE_STALE_TIME);
 
                 uint8 collateralDecimals = s_tokenDecimals[token];
-                uint256 normalizedAmount = _normalizeAmount(amount, collateralDecimals, debtTokenDecimals);
-                totalValue += (normalizedAmount * tokenPrice) / 10 ** debtTokenDecimals;
+                uint256 tokenTotalPrice =
+                    PriceFeedLib.getTokenTotalPrice(tokenPrice, amount, DEFAULT_DECIMALS, collateralDecimals);
+
+                totalValue += _normalizeAmount(tokenTotalPrice, DEFAULT_DECIMALS, debtTokenDecimals);
             }
 
             unchecked {
