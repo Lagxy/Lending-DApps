@@ -40,6 +40,7 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
     // Errors
     // ==============================================
     error Lending__InvalidAddress();
+    error Lending__AccessDenied();
     error Lending__MustBeMoreThanZero();
     error Lending__AmountExceedsLimit();
     error Lending__InsufficientLiquidity();
@@ -328,19 +329,20 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
         nonReentrant
         whenNotPaused
     {
+        CollateralRaising storage raising = s_collateralRaisings[msg.sender];
+        FunderInfo storage funder = raising.funderInfo[_funder];
+
+        if (getCollateralBalance(raising.collateralToken) < _collateralAmount) revert Lending__InsufficientCollateral();
         if (_funder == address(0)) revert Lending__InvalidAddress();
         if (_collateralAmount == 0 && _interestAmount == 0) revert Lending__MustBeMoreThanZero();
-
-        CollateralRaising storage raising = s_collateralRaisings[msg.sender];
         if (raising.isOpen) revert Lending__CollateralRaisingTargetNotMet();
-
-        FunderInfo storage funder = raising.funderInfo[_funder];
 
         // Handle collateral repayment
         if (_collateralAmount > 0) {
             if (_collateralAmount > funder.amount) revert Lending__AmountExceedsLimit();
             funder.amount -= _collateralAmount;
-            IERC20(raising.collateralToken).safeTransferFrom(msg.sender, _funder, _collateralAmount);
+            s_collateralDeposited[msg.sender][raising.collateralToken] -= _collateralAmount;
+            IERC20(raising.collateralToken).safeTransfer(_funder, _collateralAmount);
             emit CollateralRepayment(msg.sender, _funder, _collateralAmount);
         }
 
@@ -415,8 +417,6 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
      */
     function resetCollateralRaising() external {
         CollateralRaising storage raising = s_collateralRaisings[msg.sender];
-
-        if (raising.funders.length == 0) revert Lending__CollateralRaisingAlreadyClosed();
 
         uint256 funderLength = raising.funders.length;
         for (uint256 i = 0; i < funderLength;) {
@@ -623,8 +623,9 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
      * @notice get loan information
      * @return The loan info
      */
-    function getLoanInfo() public view returns (Loan memory) {
-        return s_loans[msg.sender];
+    function getLoanInfo(address _user) public view returns (Loan memory) {
+        if (msg.sender != _user && msg.sender != owner()) revert Lending__AccessDenied();
+        return s_loans[_user];
     }
 
     /**
@@ -636,7 +637,7 @@ contract Lending is Ownable, Pausable, ReentrancyGuard {
         if (_user == address(0)) revert Lending__InvalidAddress();
 
         uint256 collateralTokenLength = s_collateralTokens.length;
-        uint8 debtTokenDecimals = IERC20WithDecimals(i_debtToken).decimals();
+        uint8 debtTokenDecimals = s_tokenDecimals[i_debtToken];
         address debtTokenPriceFeed = i_debtTokenPriceFeed;
 
         for (uint256 i = 0; i < collateralTokenLength;) {

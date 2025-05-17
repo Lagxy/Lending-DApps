@@ -269,7 +269,7 @@ contract LendingTest is Test {
         emit Lending.Repaid(user1, repayAmount);
         lending.repayLoan(repayAmount);
 
-        Lending.Loan memory loan = lending.getLoanInfo();
+        Lending.Loan memory loan = lending.getLoanInfo(user1);
         vm.stopPrank();
 
         assertEq(loan.debt - loan.repaid, loan.debt - repayAmount);
@@ -295,7 +295,7 @@ contract LendingTest is Test {
 
         lending.takeLoan(borrowAmount);
 
-        uint256 debt = lending.getLoanInfo().debt;
+        uint256 debt = lending.getLoanInfo(user1).debt;
         debtToken.approve(address(lending), debt + 1);
 
         vm.expectRevert(Lending.Lending__AmountExceedsLimit.selector);
@@ -315,7 +315,7 @@ contract LendingTest is Test {
 
         lending.takeLoan(borrowAmount);
 
-        uint256 debt = lending.getLoanInfo().debt;
+        uint256 debt = lending.getLoanInfo(user1).debt;
         debtToken.approve(address(lending), debt);
         vm.stopPrank();
 
@@ -329,7 +329,7 @@ contract LendingTest is Test {
         vm.stopPrank();
 
         vm.startPrank(user1);
-        Lending.Loan memory loan = lending.getLoanInfo();
+        Lending.Loan memory loan = lending.getLoanInfo(user1);
         vm.stopPrank();
 
         assertEq(loan.debt, 0);
@@ -597,6 +597,7 @@ contract LendingTest is Test {
         vm.stopPrank();
     }
 
+    // only works if set the uniswap transfer normalized to 2 decimal or make idrx to 18 decimals
     // ============ Liquidate Tests ============
     function test_liquidate() public {
         uint256 depositAmount = 100e24; // $100
@@ -613,7 +614,7 @@ contract LendingTest is Test {
         priceFeed2.updateAnswer(5e7);
 
         // 3. Calculate expected liquidation amounts
-        uint256 totalDebt = lending.getLoanInfo().debt; // No repayments yet
+        uint256 totalDebt = lending.getLoanInfo(user1).debt; // No repayments yet
         uint256 liquidationAmount = totalDebt * (BPS_DENOMINATOR + 1_000) / BPS_DENOMINATOR; // Debt + 10% penalty
         vm.stopPrank();
 
@@ -647,7 +648,7 @@ contract LendingTest is Test {
         vm.startPrank(user1);
         uint256 userCollateral = lending.getCollateralBalance(address(collateralToken2));
         // user debt should cleared/repaid
-        Lending.Loan memory oldLoan = lending.getLoanInfo();
+        Lending.Loan memory oldLoan = lending.getLoanInfo(user1);
         vm.stopPrank();
 
         // 5. Execute liquidation
@@ -660,7 +661,7 @@ contract LendingTest is Test {
         uint256 protocolNewBalance = IERC20(debtToken).balanceOf(address(lending));
 
         vm.startPrank(user1);
-        Lending.Loan memory newLoan = lending.getLoanInfo();
+        Lending.Loan memory newLoan = lending.getLoanInfo(user1);
         uint256 remainingCollateral = lending.getCollateralBalance(address(collateralToken2));
         vm.stopPrank();
 
@@ -669,57 +670,6 @@ contract LendingTest is Test {
         assertLt(remainingCollateral, userCollateral);
         assertGt(newLoan.repaid, oldLoan.repaid);
     }
-
-    // function test_liquidate_RevertIfHealthyPosition() public {
-    //     uint256 depositAmount = 1e18;
-
-    //     // Setup collateral and loan
-    //     vm.startPrank(user1, user1);
-    //     collateralToken1.approve(address(lending), depositAmount);
-    //     lending.depositCollateral(address(collateralToken1), depositAmount);
-    //     vm.stopPrank();
-
-    //     // Check initial collateral value
-    //     uint256 collateralValue = lending.getTotalCollateralValueInDebtToken(user1);
-    //     uint256 borrowAmount = collateralValue / 2; // Conservative LTV (50%)
-
-    //     // Take loan
-    //     vm.startPrank(user1, user1);
-    //     lending.takeLoan(borrowAmount);
-    //     Lending.Loan memory loan = lending.getLoanInfo();
-    //     vm.stopPrank();
-
-    //     // Verify health factor is healthy
-    //     uint256 healthFactor =
-    //         (collateralValue * LTV_BPS * HEALTH_FACTOR_THRESHOLD_BPS) / (borrowAmount * BPS_DENOMINATOR);
-
-    //     assertGt(healthFactor, lending.HEALTH_FACTOR_THRESHOLD_BPS(), "Position should be healthy");
-
-    //     // Verify loan is not overdue
-    //     assertLt(block.timestamp, loan.dueDate, "Loan should not be overdue");
-
-    //     // Setup Uniswap mock (even though we expect revert)
-    //     uniswapRouter.setMockRate(
-    //         address(collateralToken1),
-    //         address(debtToken),
-    //         PriceFeedLib.convertPriceToTokenAmount(address(priceFeed1), address(debtTokenPriceFeed), PRICE_STALE_TIME)
-    //     );
-    //     uniswapRouter.setMockReserves(address(collateralToken1), address(debtToken), 1000e18, 1000e18);
-
-    //     // Attempt liquidation (should revert)
-    //     vm.startPrank(user2, user2);
-    //     vm.expectRevert(Lending.Lending__NotLiquidatable.selector);
-    //     lending.liquidate(user1, address(collateralToken1));
-    //     vm.stopPrank();
-
-    //     // Additional checks to ensure state unchanged
-    //     vm.startPrank(user1);
-    //     uint256 user1CollateralBalance = lending.getCollateralBalance(address(collateralToken1));
-    //     Lending.Loan memory postLoan = lending.getLoanInfo();
-    //     vm.stopPrank();
-    //     assertEq(postLoan.debt, loan.debt, "Debt should not change");
-    //     assertEq(user1CollateralBalance, depositAmount, "Collateral should not be seized");
-    // }
 
     // ============ Admin Function Tests ============
     function test_depositDebtToken() public {

@@ -90,6 +90,13 @@ contract MockUniswapV2Router is Ownable {
 
         require(amountOut >= amountOutMin, "MockUniswap: INSUFFICIENT_OUTPUT_AMOUNT");
 
+        // uniswap transfer uses 18 decimals, but IDRX only use 2 decimals
+        // the option is to change idrx to 18 decimals or make the uniswap transfer in 2 decimals, currently doing option 2
+        if (path[path.length - 1] == 0xfD498EF2a4A07189c715f43BA1Af8429C3af9B4d) {
+            // if the token is Mock IDRX, normalize to 2 decimals
+            amountOut /= (10 ** (18 - 2));
+        }
+
         amounts = new uint256[](path.length);
         amounts[0] = amountIn;
         amounts[path.length - 1] = amountOut;
